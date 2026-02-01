@@ -177,6 +177,74 @@ class TestRalphMode(unittest.TestCase):
         self.assertEqual(history[0]['status'], 'started')
         self.assertEqual(history[1]['status'], 'iterate')
         self.assertEqual(history[2]['status'], 'iterate')
+
+    def test_batch_init_creates_tasks(self):
+        """Test batch init creates tasks and sets state."""
+        tasks = [
+            {"id": "HXA-0004", "title": "RTL", "prompt": "Apply RTL"},
+            {"id": "HXA-0010", "title": "AI Gateway", "prompt": "Implement AI Gateway"}
+        ]
+
+        state = self.ralph.init_batch(tasks, max_iterations=20, completion_promise="DONE")
+
+        self.assertTrue(self.ralph.is_active())
+        self.assertEqual(state['mode'], 'batch')
+        self.assertEqual(state['tasks_total'], 2)
+        self.assertEqual(state['current_task_index'], 0)
+        self.assertTrue(self.ralph.tasks_index.exists())
+        self.assertTrue(self.ralph.tasks_dir.exists())
+
+    def test_batch_next_task(self):
+        """Test moving to the next task in batch mode."""
+        tasks = [
+            {"id": "HXA-0004", "title": "RTL", "prompt": "Apply RTL"},
+            {"id": "HXA-0010", "title": "AI Gateway", "prompt": "Implement AI Gateway"}
+        ]
+
+        self.ralph.init_batch(tasks, max_iterations=20, completion_promise="DONE")
+        state = self.ralph.next_task(reason="completed")
+
+        self.assertEqual(state['current_task_index'], 1)
+        self.assertEqual(state['iteration'], 1)
+
+    def test_batch_complete_advances(self):
+        """Test complete() advances to next task in batch mode."""
+        tasks = [
+            {"id": "HXA-0004", "title": "RTL", "prompt": "Apply RTL"},
+            {"id": "HXA-0010", "title": "AI Gateway", "prompt": "Implement AI Gateway"}
+        ]
+
+        self.ralph.init_batch(tasks, max_iterations=20, completion_promise="DONE")
+        self.assertTrue(self.ralph.complete("<promise>DONE</promise>"))
+
+        state = self.ralph.get_state()
+        self.assertIsNotNone(state)
+        self.assertEqual(state['current_task_index'], 1)
+
+    def test_batch_max_iterations_advances(self):
+        """Test reaching max iterations advances task in batch mode."""
+        tasks = [
+            {"id": "HXA-0004", "title": "RTL", "prompt": "Apply RTL"},
+            {"id": "HXA-0010", "title": "AI Gateway", "prompt": "Implement AI Gateway"}
+        ]
+
+        self.ralph.init_batch(tasks, max_iterations=1, completion_promise="DONE")
+        state = self.ralph.iterate()
+
+        self.assertEqual(state['current_task_index'], 1)
+
+    def test_batch_finishes_all_tasks(self):
+        """Test batch finishes and disables after last task."""
+        tasks = [
+            {"id": "HXA-0004", "title": "RTL", "prompt": "Apply RTL"}
+        ]
+
+        self.ralph.init_batch(tasks, max_iterations=20, completion_promise="DONE")
+
+        with self.assertRaises(ValueError):
+            self.ralph.next_task(reason="completed")
+
+        self.assertFalse(self.ralph.is_active())
     
     def test_unicode_support(self):
         """Test Unicode characters in prompts."""

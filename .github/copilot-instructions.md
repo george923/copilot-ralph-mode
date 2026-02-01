@@ -19,6 +19,8 @@ Look for:
 - `max_iterations`: Maximum allowed (0 = unlimited)
 - `completion_promise`: Text to output when genuinely done
 - `started_at`: When the loop started
+- `mode`: `single` یا `batch`
+- `current_task_index`: فقط در batch
 
 ### Step 2: Read the Task
 
@@ -27,6 +29,12 @@ cat .ralph-mode/prompt.md
 ```
 
 This contains the task you need to work on.
+
+### If Batch Mode is Active
+
+- Task list: `.ralph-mode/tasks.json`
+- Task files: `.ralph-mode/tasks/*.md`
+- Current task: `current_task_index` در `state.json`
 
 ### Step 3: Work on the Task
 

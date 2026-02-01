@@ -107,10 +107,12 @@ python ralph_mode.py disable
 | Command | Description |
 |---------|-------------|
 | `enable <prompt>` | Enable Ralph mode with the given prompt |
+| `batch-init --tasks-file <path>` | Initialize batch mode with multiple tasks |
 | `disable` | Disable Ralph mode |
 | `status` | Show current status |
 | `prompt` | Show current prompt |
 | `iterate` | Increment iteration counter |
+| `next-task` | Move to next task in batch mode |
 | `complete <output>` | Check if output contains completion promise |
 | `history` | Show iteration history |
 | `help` | Show help message |
@@ -121,6 +123,49 @@ python ralph_mode.py disable
 |--------|-------------|
 | `--max-iterations <n>` | Maximum iterations (default: 0 = unlimited) |
 | `--completion-promise <text>` | Phrase that signals completion |
+
+### Batch Mode Options
+
+| Option | Description |
+|--------|-------------|
+| `--tasks-file <path>` | JSON file with tasks list |
+| `--max-iterations <n>` | Maximum iterations per task (default: 20) |
+| `--completion-promise <text>` | Phrase that signals completion |
+
+---
+
+## 📦 Batch Mode (Multi-Task)
+
+Batch mode lets you run multiple tasks sequentially. Each task has its own file and can run up to a fixed number of iterations.
+
+### 1) Create a tasks JSON file
+
+```json
+[
+  {
+    "id": "HXA-0004",
+    "title": "پیاده‌سازی RTL در همه components",
+    "prompt": "تمام کامپوننت‌های UI را RTL کن. تست‌ها را اجرا کن."
+  },
+  {
+    "id": "HXA-0010",
+    "title": "AI Gateway Service",
+    "prompt": "سرویس AI Gateway را طبق docs/specs پیاده‌سازی کن."
+  }
+]
+```
+
+### 2) Start batch mode
+
+```bash
+python ralph_mode.py batch-init --tasks-file tasks.json --max-iterations 20 --completion-promise "DONE"
+```
+
+### 3) Move to next task (optional)
+
+```bash
+python ralph_mode.py next-task
+```
 
 ---
 
@@ -164,7 +209,9 @@ When Ralph mode is active, it creates:
 ├── state.json        # Current state (iteration, config)
 ├── prompt.md         # The task prompt
 ├── INSTRUCTIONS.md   # Instructions for Copilot
-└── history.jsonl     # Iteration history log
+├── history.jsonl     # Iteration history log
+├── tasks.json        # Task queue (batch mode)
+└── tasks/            # Each task in a separate file
 ```
 
 ### state.json Example

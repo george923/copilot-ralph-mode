@@ -269,4 +269,11 @@ Contributions are welcome! Please read our [CONTRIBUTING.md](CONTRIBUTING.md) fi
 
 ---
 
+## 👤 Author
+
+**Sepehr Bayat**
+- GitHub: [@sepehrbayat](https://github.com/sepehrbayat)
+
+---
+
 Made with ❤️ for the AI-assisted development community

@@ -26,6 +26,10 @@ OUTPUT_FILE="$RALPH_DIR/output.txt"
 HISTORY_FILE="$RALPH_DIR/history.jsonl"
 SLEEP_BETWEEN=2
 
+# Default model configuration
+DEFAULT_MODEL="gpt-5.2-codex"
+FALLBACK_MODEL="auto"
+
 # Add copilot to PATH if needed
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -100,6 +104,18 @@ get_promise() {
     get_state "completion_promise"
 }
 
+# Get model from state
+get_model() {
+    local model=$(get_state "model")
+    echo "${model:-$DEFAULT_MODEL}"
+}
+
+# Get fallback model from state
+get_fallback_model() {
+    local fallback=$(get_state "fallback_model")
+    echo "${fallback:-$FALLBACK_MODEL}"
+}
+
 # Get prompt
 get_prompt() {
     cat "$PROMPT_FILE" 2>/dev/null || echo ""
@@ -168,10 +184,13 @@ run_single() {
     local iteration=$(get_iteration)
     local max_iter=$(get_max_iterations)
     local promise=$(get_promise)
+    local model=$(get_model)
+    local fallback=$(get_fallback_model)
     
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║          🔄 Ralph Iteration $iteration                              ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}Model: $model (fallback: $fallback)${NC}"
     
     # Build context/prompt
     local context=$(build_context)
@@ -182,10 +201,16 @@ run_single() {
         echo ""
     fi
     
+    # Build model options
+    local model_opts=""
+    if [[ "$model" != "auto" && -n "$model" ]]; then
+        model_opts="--model $model"
+    fi
+    
     # Run copilot CLI
     echo -e "${BLUE}🤖 Running GitHub Copilot CLI...${NC}"
     
-    local cmd="$COPILOT_CMD -p \"$context\" $COPILOT_OPTS"
+    local cmd="$COPILOT_CMD -p \"$context\" $COPILOT_OPTS $model_opts"
     
     if [[ "$dry_run" == "true" ]]; then
         echo -e "${YELLOW}[DRY RUN] Would execute:${NC}"
@@ -196,11 +221,27 @@ run_single() {
     # Execute and capture output
     mkdir -p "$RALPH_DIR"
     
-    # Use timeout to prevent infinite hangs (10 minutes)
-    if timeout 600 $COPILOT_CMD -p "$context" $COPILOT_OPTS 2>&1 | tee "$OUTPUT_FILE"; then
+    # Try with primary model, fallback if needed
+    local exit_code=0
+    if timeout 600 $COPILOT_CMD -p "$context" $COPILOT_OPTS $model_opts 2>&1 | tee "$OUTPUT_FILE"; then
         echo ""
     else
-        echo -e "${YELLOW}⚠️ Copilot CLI exited with non-zero status${NC}"
+        exit_code=$?
+        # Check if model not available error
+        if grep -q "model.*not available\|invalid model\|Model.*not found" "$OUTPUT_FILE" 2>/dev/null; then
+            echo -e "${YELLOW}⚠️ Model '$model' not available, trying fallback '$fallback'...${NC}"
+            if [[ "$fallback" == "auto" ]]; then
+                model_opts=""
+            else
+                model_opts="--model $fallback"
+            fi
+            if timeout 600 $COPILOT_CMD -p "$context" $COPILOT_OPTS $model_opts 2>&1 | tee "$OUTPUT_FILE"; then
+                echo ""
+                exit_code=0
+            fi
+        else
+            echo -e "${YELLOW}⚠️ Copilot CLI exited with non-zero status${NC}"
+        fi
     fi
     
     # Check for completion promise in output

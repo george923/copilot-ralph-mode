@@ -23,7 +23,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+
+# Default model configuration
+DEFAULT_MODEL = "gpt-5.2-codex"
+FALLBACK_MODEL = "auto"
+AVAILABLE_MODELS = [
+    "auto",
+    "claude-sonnet-4.5", "claude-haiku-4.5", "claude-opus-4.5", "claude-sonnet-4",
+    "gemini-3-pro-preview",
+    "gpt-5.2-codex", "gpt-5.2", "gpt-5.1-codex-max", "gpt-5.1-codex", 
+    "gpt-5.1", "gpt-5", "gpt-5.1-codex-mini", "gpt-5-mini", "gpt-4.1"
+]
 
 # ANSI Colors (disabled on Windows without colorama)
 class Colors:
@@ -299,7 +310,8 @@ All iterations are logged in `.ralph-mode/history.jsonl` for review.
         self.instructions_file.write_text(content, encoding='utf-8')
     
     def enable(self, prompt: str, max_iterations: int = 0, 
-               completion_promise: Optional[str] = None) -> Dict[str, Any]:
+               completion_promise: Optional[str] = None,
+               model: Optional[str] = None) -> Dict[str, Any]:
         """Enable Ralph mode with the given configuration."""
         
         if self.is_active():
@@ -307,11 +319,16 @@ All iterations are logged in `.ralph-mode/history.jsonl` for review.
             raise ValueError(f"Ralph mode is already active (iteration {current.get('iteration', '?')}). "
                            "Use 'disable' first or 'iterate' to continue.")
         
+        # Resolve model: user choice > default > fallback
+        resolved_model = model if model else DEFAULT_MODEL
+        
         state = {
             "active": True,
             "iteration": 1,
             "max_iterations": max_iterations,
             "completion_promise": completion_promise,
+            "model": resolved_model,
+            "fallback_model": FALLBACK_MODEL,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "version": VERSION,
             "mode": "single"
@@ -326,7 +343,8 @@ All iterations are logged in `.ralph-mode/history.jsonl` for review.
         return state
 
     def init_batch(self, tasks: list, max_iterations: int = 20,
-                   completion_promise: Optional[str] = None) -> Dict[str, Any]:
+                   completion_promise: Optional[str] = None,
+                   model: Optional[str] = None) -> Dict[str, Any]:
         """Initialize batch mode with multiple tasks."""
         if self.is_active():
             current = self.get_state()
@@ -341,11 +359,16 @@ All iterations are logged in `.ralph-mode/history.jsonl` for review.
         normalized = self._write_task_files(tasks)
         self.save_tasks(normalized)
 
+        # Resolve model: user choice > default > fallback
+        resolved_model = model if model else DEFAULT_MODEL
+
         state = {
             "active": True,
             "iteration": 1,
             "max_iterations": max_iterations,
             "completion_promise": completion_promise,
+            "model": resolved_model,
+            "fallback_model": FALLBACK_MODEL,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "version": VERSION,
             "mode": "batch",
@@ -532,11 +555,17 @@ def cmd_enable(args) -> int:
         print("\nUsage: ralph-mode enable \"Your task description\" [options]")
         return 1
     
+    # Validate model if provided
+    model = args.model
+    if model and model != "auto" and model not in AVAILABLE_MODELS:
+        print(f"{colors.YELLOW}⚠️ Warning: Model '{model}' may not be available. Using anyway...{colors.NC}")
+    
     try:
         state = ralph.enable(
             prompt=prompt,
             max_iterations=args.max_iterations,
-            completion_promise=args.completion_promise
+            completion_promise=args.completion_promise,
+            model=model
         )
     except ValueError as e:
         print(f"{colors.RED}❌ Error: {e}{colors.NC}")
@@ -546,6 +575,8 @@ def cmd_enable(args) -> int:
     
     print(f"{colors.CYAN}Iteration:{colors.NC}          1")
     print(f"{colors.CYAN}Max Iterations:{colors.NC}     {args.max_iterations if args.max_iterations > 0 else 'unlimited'}")
+    print(f"{colors.CYAN}Model:{colors.NC}              {state.get('model', DEFAULT_MODEL)}")
+    print(f"{colors.CYAN}Fallback:{colors.NC}           {state.get('fallback_model', FALLBACK_MODEL)}")
     print(f"{colors.CYAN}Completion Promise:{colors.NC} {args.completion_promise or 'none'}")
     print()
     print(f"{colors.YELLOW}📝 Task:{colors.NC}")
@@ -594,12 +625,18 @@ def cmd_batch_init(args) -> int:
     """Handle batch-init command."""
     ralph = RalphMode()
 
+    # Validate model if provided
+    model = args.model
+    if model and model != "auto" and model not in AVAILABLE_MODELS:
+        print(f"{colors.YELLOW}⚠️ Warning: Model '{model}' may not be available. Using anyway...{colors.NC}")
+
     try:
         tasks = _load_tasks_from_file(args.tasks_file)
         state = ralph.init_batch(
             tasks=tasks,
             max_iterations=args.max_iterations,
-            completion_promise=args.completion_promise
+            completion_promise=args.completion_promise,
+            model=model
         )
     except ValueError as e:
         print(f"{colors.RED}❌ Error: {e}{colors.NC}")
@@ -611,6 +648,8 @@ def cmd_batch_init(args) -> int:
     print(f"{colors.CYAN}Current Task:{colors.NC}     1/{state.get('tasks_total')}")
     print(f"{colors.CYAN}Iteration:{colors.NC}        1")
     print(f"{colors.CYAN}Max Iterations:{colors.NC}   {args.max_iterations}")
+    print(f"{colors.CYAN}Model:{colors.NC}            {state.get('model', DEFAULT_MODEL)}")
+    print(f"{colors.CYAN}Fallback:{colors.NC}         {state.get('fallback_model', FALLBACK_MODEL)}")
     print(f"{colors.CYAN}Completion Promise:{colors.NC} {args.completion_promise or 'none'}")
     print()
     print(f"{colors.YELLOW}📝 Current Task:{colors.NC}")
@@ -670,6 +709,10 @@ def cmd_status(args) -> int:
     print(f"{colors.CYAN}Iteration:{colors.NC}          {status.get('iteration', '?')}")
     max_iter = status.get('max_iterations', 0)
     print(f"{colors.CYAN}Max Iterations:{colors.NC}     {max_iter if max_iter > 0 else 'unlimited'}")
+    model = status.get('model', DEFAULT_MODEL)
+    fallback = status.get('fallback_model', FALLBACK_MODEL)
+    print(f"{colors.CYAN}Model:{colors.NC}              {model}")
+    print(f"{colors.CYAN}Fallback:{colors.NC}           {fallback}")
     promise = status.get('completion_promise')
     print(f"{colors.CYAN}Completion Promise:{colors.NC} {promise if promise else 'none'}")
     print(f"{colors.CYAN}Started At:{colors.NC}         {status.get('started_at', '?')}")
@@ -769,6 +812,7 @@ def cmd_history(args) -> int:
 
 def cmd_help(args) -> int:
     """Handle help command."""
+    models_str = ", ".join(AVAILABLE_MODELS[:5]) + "..."
     print(f"""
 {colors.GREEN}🔄 Copilot Ralph Mode v{VERSION}{colors.NC}
 
@@ -793,16 +837,24 @@ self-referential AI development loops with GitHub Copilot.
 {colors.YELLOW}ENABLE OPTIONS:{colors.NC}
     --max-iterations <n>        Maximum iterations (default: 0 = unlimited)
     --completion-promise <text> Phrase that signals completion
+    --model <model>             AI model to use (default: {DEFAULT_MODEL})
 
 {colors.YELLOW}BATCH OPTIONS:{colors.NC}
     --tasks-file <path>          JSON file with tasks list
     --max-iterations <n>         Maximum iterations per task (default: 20)
     --completion-promise <text>  Phrase that signals completion
+    --model <model>              AI model to use (default: {DEFAULT_MODEL})
+
+{colors.YELLOW}MODEL OPTIONS:{colors.NC}
+    auto                         Automatic model selection
+    {DEFAULT_MODEL}                    Default model (recommended for coding)
+    Available: {models_str}
 
 {colors.YELLOW}EXAMPLES:{colors.NC}
     ralph-mode enable "Build a REST API" --max-iterations 20
+    ralph-mode enable "Fix tests" --model claude-sonnet-4.5
+    ralph-mode enable "Refactor code" --model auto
     ralph-mode batch-init --tasks-file tasks.json --max-iterations 20
-    ralph-mode enable "Fix tests" --completion-promise "ALL PASS"
     ralph-mode status
     ralph-mode iterate
     ralph-mode next-task
@@ -837,6 +889,9 @@ def main() -> int:
                               help='Maximum iterations (0 = unlimited)')
     enable_parser.add_argument('--completion-promise', type=str, default=None,
                               help='Phrase that signals completion')
+    enable_parser.add_argument('--model', type=str, default=None,
+                              help=f'AI model to use (default: {DEFAULT_MODEL}, fallback: {FALLBACK_MODEL}). '
+                                   f'Use "auto" for automatic selection.')
     enable_parser.set_defaults(func=cmd_enable)
 
     # Batch init command
@@ -846,6 +901,9 @@ def main() -> int:
                               help='Maximum iterations per task (default: 20)')
     batch_parser.add_argument('--completion-promise', type=str, default=None,
                               help='Phrase that signals completion')
+    batch_parser.add_argument('--model', type=str, default=None,
+                              help=f'AI model to use (default: {DEFAULT_MODEL}, fallback: {FALLBACK_MODEL}). '
+                                   f'Use "auto" for automatic selection.')
     batch_parser.set_defaults(func=cmd_batch_init)
     
     # Disable command

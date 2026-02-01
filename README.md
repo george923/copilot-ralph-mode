@@ -4,6 +4,8 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-Copilot-blue)](https://github.com/features/copilot)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.7+-blue.svg)](https://www.python.org/)
+[![Cross-Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
 
 ---
 
@@ -43,69 +45,82 @@ The technique is named after Ralph Wiggum from The Simpsons, embodying the philo
 
 ## 🚀 Quick Start
 
-### 1. Enable Ralph Mode
+### Installation
 
 ```bash
-# In your project directory
-./ralph-mode.sh enable "Your task description" --max-iterations 20 --completion-promise "DONE"
+# Clone the repository
+git clone https://github.com/sepehrbayat/copilot-ralph-mode.git
+cd copilot-ralph-mode
+
+# Make executable (Linux/macOS)
+chmod +x ralph_mode.py ralph-mode.sh
+
+# Or use directly with Python (all platforms)
+python ralph_mode.py --help
 ```
 
-### 2. Work with Copilot
-
-Just work normally! When you ask Copilot to do something, it will:
-1. Read the active Ralph prompt
-2. Work on the task
-3. Check if completion criteria met
-4. If not done → continue iterating
-
-### 3. Disable Ralph Mode
+### Enable Ralph Mode
 
 ```bash
-./ralph-mode.sh disable
+# Linux/macOS
+./ralph_mode.py enable "Build a REST API for todos" --max-iterations 20 --completion-promise "DONE"
+
+# Windows (PowerShell)
+python ralph_mode.py enable "Build a REST API for todos" --max-iterations 20 --completion-promise "DONE"
+
+# Windows (CMD)
+ralph-mode.cmd enable "Build a REST API for todos" --max-iterations 20 --completion-promise "DONE"
+```
+
+### Check Status
+
+```bash
+python ralph_mode.py status
+```
+
+### Disable Ralph Mode
+
+```bash
+python ralph_mode.py disable
 ```
 
 ---
 
-## 📦 Installation
+## 📦 Cross-Platform Support
 
-```bash
-# Clone this repo
-git clone https://github.com/YOUR_USERNAME/copilot-ralph-mode.git
+| Platform | Command |
+|----------|---------|
+| **Linux/macOS** | `./ralph_mode.py` or `./ralph-mode.sh` |
+| **Windows PowerShell** | `python ralph_mode.py` or `.\ralph-mode.ps1` |
+| **Windows CMD** | `python ralph_mode.py` or `ralph-mode.cmd` |
 
-# Copy to your project
-cp -r copilot-ralph-mode/.ralph-mode your-project/
+### Requirements
 
-# Or install globally
-ln -s $(pwd)/copilot-ralph-mode/ralph-mode.sh /usr/local/bin/ralph-mode
-```
+- Python 3.7 or higher
+- No external dependencies (uses only Python standard library)
+- Optional: `colorama` for colored output on Windows
 
 ---
 
 ## 🛠️ Commands
 
-### Enable Ralph Mode
-```bash
-./ralph-mode.sh enable "<prompt>" [OPTIONS]
+| Command | Description |
+|---------|-------------|
+| `enable <prompt>` | Enable Ralph mode with the given prompt |
+| `disable` | Disable Ralph mode |
+| `status` | Show current status |
+| `prompt` | Show current prompt |
+| `iterate` | Increment iteration counter |
+| `complete <output>` | Check if output contains completion promise |
+| `history` | Show iteration history |
+| `help` | Show help message |
 
-Options:
-  --max-iterations <n>        Maximum iterations (default: unlimited)
-  --completion-promise <text> Phrase that signals completion
-```
+### Enable Options
 
-### Disable Ralph Mode
-```bash
-./ralph-mode.sh disable
-```
-
-### Check Status
-```bash
-./ralph-mode.sh status
-```
-
-### View Current Prompt
-```bash
-./ralph-mode.sh prompt
-```
+| Option | Description |
+|--------|-------------|
+| `--max-iterations <n>` | Maximum iterations (default: 0 = unlimited) |
+| `--completion-promise <text>` | Phrase that signals completion |
 
 ---
 
@@ -131,27 +146,39 @@ When complete, output: <promise>COMPLETE</promise>
 Build a todo API and make it good.
 ```
 
+### Tips
+
+1. **Clear Completion Criteria** - Define exactly what "done" means
+2. **Incremental Goals** - Break large tasks into phases
+3. **Self-Correction** - Include TDD or verification steps
+4. **Escape Hatches** - Always use `--max-iterations` as safety
+
 ---
 
-## 🔧 Configuration Files
+## 🔧 File Structure
 
-### `.ralph-mode/state.md`
+When Ralph mode is active, it creates:
 
-```yaml
----
-active: true
-iteration: 1
-max_iterations: 20
-completion_promise: "DONE"
-started_at: "2026-02-01T17:00:00Z"
----
-
-Your task prompt goes here...
+```
+.ralph-mode/
+├── state.json        # Current state (iteration, config)
+├── prompt.md         # The task prompt
+├── INSTRUCTIONS.md   # Instructions for Copilot
+└── history.jsonl     # Iteration history log
 ```
 
-### `.ralph-mode/INSTRUCTIONS.md`
+### state.json Example
 
-Instructions for Copilot on how to work in Ralph mode.
+```json
+{
+  "active": true,
+  "iteration": 3,
+  "max_iterations": 20,
+  "completion_promise": "DONE",
+  "started_at": "2026-02-01T18:00:00Z",
+  "version": "1.0.0"
+}
+```
 
 ---
 
@@ -184,6 +211,21 @@ Ralph embodies several key principles:
 
 ---
 
+## 🧪 Running Tests
+
+```bash
+# Python tests (cross-platform)
+python -m pytest tests/ -v
+
+# Or directly
+python tests/test_ralph_mode.py
+
+# Bash tests (Linux/macOS only)
+bash tests/test-ralph-mode.sh
+```
+
+---
+
 ## 🌟 Real-World Results
 
 From the original Ralph technique:
@@ -209,13 +251,21 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please read our contributing guidelines first.
+Contributions are welcome! Please read our [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing`)
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing`)
 5. Open a Pull Request
+
+---
+
+## 🙏 Credits
+
+- **Geoffrey Huntley** - Original Ralph technique
+- **Anthropic** - Claude Code ralph-wiggum plugin inspiration
+- **GitHub Copilot** - AI pair programming
 
 ---
 

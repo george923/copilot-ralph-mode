@@ -1,0 +1,21 @@
+# Copilot Ralph Mode - State Files
+.ralph-mode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temp
+*.tmp
+*.temp
+*.bak
+
+# Logs
+*.log

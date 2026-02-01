@@ -1,0 +1,31 @@
+{
+  "name": "copilot-ralph-mode",
+  "version": "1.0.0",
+  "description": "Implementation of the Ralph Wiggum technique for iterative, self-referential AI development loops with GitHub Copilot",
+  "main": "ralph-mode.sh",
+  "bin": {
+    "ralph-mode": "./ralph-mode.sh"
+  },
+  "scripts": {
+    "test": "bash tests/test-ralph-mode.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_USERNAME/copilot-ralph-mode.git"
+  },
+  "keywords": [
+    "copilot",
+    "github-copilot",
+    "ralph-wiggum",
+    "iterative-development",
+    "ai-development",
+    "automation",
+    "development-loop"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/YOUR_USERNAME/copilot-ralph-mode/issues"
+  },
+  "homepage": "https://github.com/YOUR_USERNAME/copilot-ralph-mode#readme"
+}

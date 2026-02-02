@@ -18,6 +18,7 @@
 - [What is Ralph?](#-what-is-ralph)
 - [How It Works](#-how-it-works)
 - [Quick Start](#-quick-start)
+- [Dev Container](#-dev-container)
 - [Copilot CLI Integration](#-copilot-cli-integration)
 - [Custom Agents](#-custom-agents)
 - [Auto-Agents](#-auto-agents)
@@ -111,7 +112,36 @@ copilot --help
 
 ### Installation
 
-#### One-Line Install (Recommended)
+#### 🐳 Dev Container (Recommended)
+
+The easiest way to get started is using VS Code Dev Containers. This ensures a consistent development environment across all platforms.
+
+**Prerequisites:**
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [VS Code](https://code.visualstudio.com/) with [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+
+**Quick Start:**
+1. Clone the repository
+2. Open in VS Code
+3. Click "Reopen in Container" when prompted (or run `Dev Containers: Reopen in Container` from command palette)
+4. Wait for container to build (~2-3 minutes first time)
+5. Done! All tools pre-installed.
+
+```bash
+git clone https://github.com/sepehrbayat/copilot-ralph-mode.git
+code copilot-ralph-mode
+# VS Code will prompt to reopen in container
+```
+
+**Dev Container Features:**
+- ✅ Python 3.11 with all dependencies
+- ✅ GitHub CLI pre-configured
+- ✅ Zsh with helpful aliases (`ralph`, `test`, `lint`)
+- ✅ VS Code extensions auto-installed
+- ✅ Git configured with useful aliases
+- ✅ Consistent environment on Windows, macOS, Linux
+
+#### One-Line Install (Alternative)
 
 **macOS/Linux:**
 ```bash
@@ -1239,10 +1269,85 @@ For MCP servers requiring secrets:
 
 ---
 
+## � Dev Container
+
+**Recommended for all developers** - eliminates "works on my machine" issues.
+
+### Why Dev Container?
+
+| Problem | Solution |
+|---------|----------|
+| Different Python versions | Container uses Python 3.11 |
+| Missing dependencies | All packages pre-installed |
+| Path issues (Windows vs Unix) | Consistent Linux paths |
+| Shell script compatibility | Bash/Zsh always available |
+| IDE configuration | VS Code extensions auto-install |
+
+### Container Structure
+
+```
+.devcontainer/
+├── devcontainer.json    # VS Code Dev Container config
+├── Dockerfile           # Container image definition
+├── docker-compose.yml   # Services and volumes
+├── post-create.sh       # One-time setup script
+└── post-start.sh        # Runs on every start
+```
+
+### Pre-installed Tools
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Python | 3.11 | Core runtime |
+| Git | Latest | Version control |
+| GitHub CLI | Latest | `gh` commands |
+| pytest | 7.0+ | Testing |
+| black | 23.0+ | Code formatting |
+| flake8 | 6.0+ | Linting |
+| mypy | 1.0+ | Type checking |
+| Zsh + Oh My Zsh | Latest | Better shell |
+
+### Quick Commands (in container)
+
+```bash
+# Ralph Mode
+ralph-quick 'Build a REST API'  # Enable and show status
+ralph-loop                       # Start the loop
+ralph-status                     # Check status
+
+# Testing
+test                            # Run all tests
+test-fast                       # Quick test (stop on first fail)
+test-cov                        # With coverage
+
+# Code Quality
+lint                            # Check all
+format                          # Auto-fix formatting
+typecheck                       # MyPy type checking
+
+# Git
+gs                              # git status
+gc                              # git commit
+gp                              # git push
+```
+
+### Rebuilding Container
+
+```bash
+# From VS Code Command Palette:
+Dev Containers: Rebuild Container
+
+# Or from terminal:
+docker compose -f .devcontainer/docker-compose.yml build --no-cache
+```
+
+---
+
 ## 📦 Cross-Platform Support
 
 | Platform | State Management | Loop Runner |
 |----------|-----------------|-------------|
+| **Dev Container** ⭐ | `ralph` | `ralph-loop` |
 | **Linux/macOS** | `python3 ralph_mode.py` | `./ralph-loop.sh` |
 | **Windows (WSL)** | `python3 ralph_mode.py` | `./ralph-loop.sh` |
 | **Windows (PowerShell)** | `python ralph_mode.py` | `./ralph-mode.ps1` or WSL |
@@ -1250,6 +1355,11 @@ For MCP servers requiring secrets:
 
 ### Requirements
 
+**Using Dev Container (Recommended):**
+- Docker Desktop
+- VS Code with Dev Containers extension
+
+**Manual Installation:**
 - Python 3.7+
 - GitHub CLI (`gh`) with Copilot access
 - Bash shell (for loop runner) or PowerShell on Windows

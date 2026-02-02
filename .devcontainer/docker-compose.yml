@@ -1,0 +1,76 @@
+# =============================================================================
+# Copilot Ralph Mode - Docker Compose for Dev Container
+# =============================================================================
+
+services:
+  ralph-dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+      target: development
+      args:
+        USERNAME: vscode
+        USER_UID: 1000
+        USER_GID: 1000
+
+    # Keep container running
+    command: sleep infinity
+
+    # Container name
+    container_name: ralph-mode-dev
+
+    # Volume mounts
+    volumes:
+      # Mount the workspace
+      - ..:/workspace:cached
+
+      # Persist VS Code extensions
+      - vscode-extensions:/home/vscode/.vscode-server/extensions
+
+      # Persist command history
+      - zsh-history:/home/vscode/.zsh_history_dir
+
+      # Persist pip cache for faster rebuilds
+      - pip-cache:/home/vscode/.cache/pip
+
+      # Persist git config (from host)
+      - ~/.gitconfig:/home/vscode/.gitconfig:ro
+
+      # SSH keys (for GitHub push)
+      - ~/.ssh:/home/vscode/.ssh:ro
+
+    # Environment variables
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - RALPH_MODE_DEV=1
+      - TERM=xterm-256color
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+    # Network
+    network_mode: host
+
+    # Security
+    security_opt:
+      - seccomp:unconfined
+
+    # Init process
+    init: true
+
+# Named volumes for persistence
+volumes:
+  vscode-extensions:
+    name: ralph-mode-vscode-extensions
+  zsh-history:
+    name: ralph-mode-zsh-history
+  pip-cache:
+    name: ralph-mode-pip-cache

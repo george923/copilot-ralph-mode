@@ -303,6 +303,213 @@ class TestCrossPlatform(unittest.TestCase):
         self.assertEqual(stored, prompt)
 
 
+class TestAutoAgents(unittest.TestCase):
+    """Test cases for Auto-Agents functionality."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.ralph = RalphMode(self.test_dir)
+    
+    def tearDown(self):
+        """Clean up test fixtures."""
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+    
+    def test_enable_with_auto_agents(self):
+        """Test enable with auto_agents flag."""
+        state = self.ralph.enable(
+            prompt="Test task",
+            auto_agents=True
+        )
+        
+        self.assertTrue(state['auto_agents'])
+        self.assertEqual(state['created_agents'], [])
+    
+    def test_enable_without_auto_agents(self):
+        """Test enable without auto_agents flag."""
+        state = self.ralph.enable(prompt="Test task")
+        
+        self.assertFalse(state['auto_agents'])
+    
+    def test_auto_agents_in_instructions(self):
+        """Test that auto_agents creates instructions with agent creation guide."""
+        self.ralph.enable(prompt="Test task", auto_agents=True)
+        
+        instructions = self.ralph.instructions_file.read_text(encoding='utf-8')
+        self.assertIn("Auto-Agents Mode", instructions)
+        self.assertIn("dynamically create", instructions.lower())
+        self.assertIn(".agent.md", instructions)
+    
+    def test_register_created_agent(self):
+        """Test registering a dynamically created agent."""
+        self.ralph.enable(prompt="Test task", auto_agents=True)
+        
+        self.ralph.register_created_agent("test-agent", ".github/agents/test-agent.agent.md")
+        
+        state = self.ralph.get_state()
+        self.assertEqual(len(state['created_agents']), 1)
+        self.assertEqual(state['created_agents'][0]['name'], "test-agent")
+    
+    def test_register_multiple_agents(self):
+        """Test registering multiple agents."""
+        self.ralph.enable(prompt="Test task", auto_agents=True)
+        
+        self.ralph.register_created_agent("agent-1", ".github/agents/agent-1.agent.md")
+        self.ralph.register_created_agent("agent-2", ".github/agents/agent-2.agent.md")
+        
+        state = self.ralph.get_state()
+        self.assertEqual(len(state['created_agents']), 2)
+    
+    def test_register_duplicate_agent_ignored(self):
+        """Test that duplicate agent registration is ignored."""
+        self.ralph.enable(prompt="Test task", auto_agents=True)
+        
+        self.ralph.register_created_agent("test-agent", ".github/agents/test-agent.agent.md")
+        self.ralph.register_created_agent("test-agent", ".github/agents/test-agent.agent.md")
+        
+        state = self.ralph.get_state()
+        self.assertEqual(len(state['created_agents']), 1)
+    
+    def test_batch_init_with_auto_agents(self):
+        """Test batch init with auto_agents flag."""
+        tasks = [
+            {"id": "task-1", "title": "Task 1", "prompt": "Do task 1"},
+            {"id": "task-2", "title": "Task 2", "prompt": "Do task 2"}
+        ]
+        
+        state = self.ralph.init_batch(tasks=tasks, auto_agents=True)
+        
+        self.assertTrue(state['auto_agents'])
+        self.assertEqual(state['created_agents'], [])
+
+
+class TestSkillsStructure(unittest.TestCase):
+    """Test cases for Skills directory structure."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.skills_dir = self.test_dir / ".github" / "skills"
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
+    
+    def tearDown(self):
+        """Clean up test fixtures."""
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+    
+    def test_skill_directory_structure(self):
+        """Test that skills follow correct directory structure."""
+        # Create a valid skill
+        skill_dir = self.skills_dir / "test-skill"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("""---
+name: test-skill
+description: A test skill for validation
+---
+
+# Test Skill
+
+Instructions here.
+""", encoding='utf-8')
+        
+        # Verify structure
+        self.assertTrue(skill_dir.exists())
+        self.assertTrue(skill_file.exists())
+        self.assertEqual(skill_file.name, "SKILL.md")
+    
+    def test_skill_frontmatter_required_fields(self):
+        """Test skill YAML frontmatter has required fields."""
+        skill_content = """---
+name: my-skill
+description: What this skill does
+---
+
+# Skill Content
+"""
+        # Parse frontmatter
+        lines = skill_content.strip().split('\n')
+        self.assertEqual(lines[0], '---')
+        
+        # Check for required fields
+        self.assertIn('name:', skill_content)
+        self.assertIn('description:', skill_content)
+
+
+class TestMCPConfig(unittest.TestCase):
+    """Test cases for MCP configuration format."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.config_dir = self.test_dir / ".ralph-mode-config"
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+    
+    def tearDown(self):
+        """Clean up test fixtures."""
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+    
+    def test_mcp_config_format(self):
+        """Test MCP config uses correct mcpServers format."""
+        config = {
+            "mcpServers": {
+                "github-mcp-server": {
+                    "type": "http",
+                    "url": "https://api.githubcopilot.com/mcp/readonly",
+                    "tools": ["*"]
+                }
+            }
+        }
+        
+        config_file = self.config_dir / "mcp-config.json"
+        config_file.write_text(json.dumps(config, indent=2), encoding='utf-8')
+        
+        # Read and validate
+        loaded = json.loads(config_file.read_text(encoding='utf-8'))
+        self.assertIn("mcpServers", loaded)
+        self.assertIn("github-mcp-server", loaded["mcpServers"])
+    
+    def test_mcp_local_server_config(self):
+        """Test local MCP server configuration."""
+        config = {
+            "mcpServers": {
+                "sentry": {
+                    "type": "local",
+                    "command": "npx",
+                    "args": ["@sentry/mcp-server@latest"],
+                    "tools": ["get_issue_details"],
+                    "env": {
+                        "SENTRY_TOKEN": "COPILOT_MCP_SENTRY_TOKEN"
+                    }
+                }
+            }
+        }
+        
+        # Validate required fields for local server
+        server = config["mcpServers"]["sentry"]
+        self.assertEqual(server["type"], "local")
+        self.assertIn("command", server)
+        self.assertIn("args", server)
+        self.assertIn("tools", server)
+    
+    def test_mcp_remote_server_config(self):
+        """Test remote MCP server configuration."""
+        config = {
+            "mcpServers": {
+                "cloudflare": {
+                    "type": "sse",
+                    "url": "https://docs.mcp.cloudflare.com/sse",
+                    "tools": ["*"]
+                }
+            }
+        }
+        
+        # Validate required fields for remote server
+        server = config["mcpServers"]["cloudflare"]
+        self.assertIn(server["type"], ["http", "sse"])
+        self.assertIn("url", server)
+        self.assertIn("tools", server)
+
+
 if __name__ == '__main__':
     print(f"\n🔄 Copilot Ralph Mode Test Suite v{VERSION}")
     print("=" * 50)

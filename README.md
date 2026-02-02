@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.7+-blue.svg)](https://www.python.org/)
 [![Cross-Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
+[![Copilot CLI](https://img.shields.io/badge/Copilot%20CLI-Compatible-brightgreen.svg)]()
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Sepehr%20Bayat-blue?logo=linkedin)](https://www.linkedin.com/in/sepehrbayat/)
 
 **Author:** [Sepehr Bayat](https://www.linkedin.com/in/sepehrbayat/)
@@ -17,10 +18,18 @@
 - [What is Ralph?](#-what-is-ralph)
 - [How It Works](#-how-it-works)
 - [Quick Start](#-quick-start)
+- [Copilot CLI Integration](#-copilot-cli-integration)
+- [Custom Agents](#-custom-agents)
+- [Auto-Agents](#-auto-agents)
+- [Skills](#-skills)
+- [Hooks](#-hooks)
+- [Security Considerations](#-security-considerations)
+- [Network Resilience](#-network-resilience)
 - [Usage Modes](#-usage-modes)
 - [Commands Reference](#-commands-reference)
 - [Best Practices](#-best-practices)
 - [File Structure](#-file-structure)
+- [MCP Server Integration](#-mcp-server-integration)
 - [Cross-Platform Support](#-cross-platform-support)
 - [Testing](#-testing)
 - [Philosophy](#-philosophy)
@@ -34,6 +43,8 @@ Ralph is a development methodology based on continuous AI agent loops. As Geoffr
 
 The technique is named after Ralph Wiggum from The Simpsons, embodying the philosophy of persistent iteration despite setbacks.
 
+**This implementation is fully compatible with GitHub Copilot CLI**, supporting all its features including custom agents, plan mode, MCP servers, and context management.
+
 ---
 
 ## 🎯 How It Works
@@ -43,7 +54,7 @@ The technique is named after Ralph Wiggum from The Simpsons, embodying the philo
 │                    Ralph Loop                           │
 │                                                         │
 │   ┌──────────┐     ┌────────────┐     ┌──────────┐     │
-│   │  Prompt  │────▶│ gh copilot │────▶│   Work   │     │
+│   │  Prompt  │────▶│  copilot   │────▶│   Work   │     │
 │   │   File   │     │   -p ...   │     │  on Task │     │
 │   └──────────┘     └────────────┘     └────┬─────┘     │
 │        ▲                                    │          │
@@ -88,11 +99,14 @@ sudo apt install gh
 # Windows
 winget install GitHub.cli
 
+# Install GitHub Copilot CLI
+# See: https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli
+
 # Authenticate
 gh auth login
 
-# Verify Copilot access
-gh copilot --help
+# Verify Copilot CLI access
+copilot --help
 ```
 
 ### Installation
@@ -116,9 +130,491 @@ python3 ralph_mode.py enable "Create a Python calculator with unit tests" \
 
 # 2. Run the loop
 ./ralph-loop.sh run
+
+# Or with a specific agent
+./ralph-loop.sh run --agent ralph
 ```
 
 That's it! Ralph will iterate until the task is complete.
+
+---
+
+## 🤖 Copilot CLI Integration
+
+Ralph Mode is fully integrated with GitHub Copilot CLI features.
+
+### Slash Commands
+
+While running Ralph loops, you can use these Copilot CLI commands:
+
+| Command | Description |
+|---------|-------------|
+| `/context` | View current token usage |
+| `/compact` | Compress conversation history |
+| `/usage` | View session statistics |
+| `/review` | Review code changes |
+| `/agent` | Select a custom agent |
+| `/cwd` | Change working directory |
+| `/add-dir` | Add a trusted directory |
+| `/resume` | Resume a previous session |
+| `/mcp add` | Add an MCP server |
+| `/delegate` | Hand off to Copilot coding agent |
+
+### Plan Mode
+
+Press `Shift+Tab` during an interactive session to enter plan mode - collaborate on implementation plans before writing code.
+
+### File References
+
+Use `@` to reference files in prompts:
+```
+Fix the bug in @src/auth/login.ts
+Explain @config/ci/ci-required-checks.yml
+```
+
+### Delegating to Copilot Coding Agent
+
+Hand off complex tasks to Copilot coding agent:
+```
+/delegate complete the API integration tests
+& fix all failing edge cases
+```
+
+### Context Management
+
+Copilot CLI automatically manages context. Commands for context control:
+
+```bash
+# View current token usage
+/context
+
+# Compress conversation history when context fills up
+/compact
+
+# View session statistics
+/usage
+```
+
+### Resuming Sessions
+
+```bash
+# Resume the most recent session
+copilot --continue
+
+# Or cycle through previous sessions
+copilot --resume
+```
+
+### Permissions
+
+Ralph Mode uses these permission flags:
+
+```bash
+# Enable all permissions (for trusted environments)
+./ralph-loop.sh run --allow-all
+
+# Pre-approve specific URLs
+./ralph-loop.sh run --allow-url github.com
+
+# Restrict permissions
+./ralph-loop.sh run --no-allow-tools --no-allow-paths
+```
+
+---
+
+## 🤖 Custom Agents
+
+Ralph Mode includes custom agents optimized for different tasks.
+
+### Available Agents
+
+| Agent | Description | Use For |
+|-------|-------------|---------|
+| `ralph` | Main iteration agent | Ralph Mode loop work |
+| `plan` | Planning agent | Creating implementation plans |
+| `code-review` | Review agent | Reviewing changes |
+| `task` | Task runner | Running tests and builds |
+| `explore` | Exploration agent | Quick codebase questions |
+| `agent-creator` | Meta-agent | Creating new specialized agents |
+
+### Using Agents
+
+```bash
+# Use the ralph agent for iterations
+./ralph-loop.sh run --agent ralph
+
+# Use plan agent to create a plan first
+copilot --agent=plan --prompt "Create a plan for implementing user authentication"
+
+# Use task agent to run tests
+copilot --agent=task --prompt "Run all tests and summarize results"
+```
+
+### Creating Custom Agents
+
+Create agent profiles in `.github/agents/`:
+
+```markdown
+# my-agent.md
+
+## Description
+What this agent does.
+
+## Prompts
+Instructions for behavior.
+
+## Tools
+Which tools it can use.
+
+## Behavior
+How it should act.
+```
+
+---
+
+## 🤖 Auto-Agents
+
+Auto-Agents is a powerful feature that allows Ralph to **dynamically create specialized sub-agents** during task execution.
+
+### Enabling Auto-Agents
+
+```bash
+python ralph_mode.py enable "Complex refactoring task" \
+    --max-iterations 20 \
+    --auto-agents \
+    --completion-promise "DONE"
+```
+
+### How It Works
+
+When `--auto-agents` is enabled:
+
+1. **Agent Creator Available**: The `@agent-creator` meta-agent provides guidance
+2. **Dynamic Creation**: Ralph can create new `.agent.md` files in `.github/agents/`
+3. **Tracking**: Each created agent is tracked in `state.json` under `created_agents`
+4. **Invocation**: Created agents can be invoked with `@agent-name <task>`
+
+### Example Workflow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. Ralph encounters complex testing subtask                │
+│                                                             │
+│  2. Creates .github/agents/test-specialist.agent.md         │
+│     with specialized testing instructions                   │
+│                                                             │
+│  3. Invokes @test-specialist to handle testing workload     │
+│                                                             │
+│  4. Continues main task while sub-agent handles tests       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Agent File Format
+
+```markdown
+---
+name: my-custom-agent
+description: What this agent does
+tools:
+  - read_file
+  - edit_file
+  - run_in_terminal
+---
+
+# Agent Instructions
+
+Your specialized instructions here...
+```
+
+### When to Create Sub-Agents
+
+- Complex subtasks requiring focused context
+- Repetitive operations benefiting from dedicated tooling
+- Parallel workstreams needing isolation
+- Code review, testing, or refactoring tasks
+
+### Design Guidelines
+
+- **Single Responsibility**: Each agent should do one thing well
+- **Minimal Tools**: Only include tools the agent needs
+- **Clear Instructions**: Be explicit about capabilities and limitations
+
+---
+
+## 📚 Skills
+
+Skills are folders of instructions, scripts, and resources that enhance Copilot's abilities for specialized tasks. Skills follow the [Agent Skills](https://docs.github.com/en/copilot/customizing-copilot/extending-copilot/agent-skills) open standard.
+
+### Available Skills
+
+Located in `.github/skills/` (each skill in its own directory with `SKILL.md`):
+
+| Skill | Description |
+|-------|-------------|
+| `ralph-iteration` | Guides through completing a Ralph Mode iteration |
+| `test-runner` | Standardized test execution across languages |
+| `code-analysis` | Quick codebase analysis techniques |
+
+### Skill Structure
+
+```
+.github/skills/
+├── ralph-iteration/
+│   └── SKILL.md           # Required: skill instructions
+├── test-runner/
+│   └── SKILL.md
+└── code-analysis/
+    └── SKILL.md
+```
+
+### Creating Custom Skills
+
+Create a new skill directory with a `SKILL.md` file:
+
+```markdown
+---
+name: my-custom-skill
+description: What this skill does. When Copilot should use it.
+---
+
+# My Custom Skill
+
+Instructions for Copilot to follow...
+```
+
+### SKILL.md Requirements
+
+- **name** (required): Lowercase, hyphens for spaces
+- **description** (required): What it does and when to use it
+- **license** (optional): License information
+
+Skills can also include scripts, examples, or other resources in the same directory.
+
+---
+
+## 🪝 Hooks
+
+Hooks allow you to execute custom shell commands at key points during Ralph Mode execution.
+
+### Available Hooks
+
+Located in `.github/hooks/`:
+
+| Hook | When it Runs |
+|------|--------------|
+| `pre-iteration.sh` | Before each Copilot CLI iteration |
+| `post-iteration.sh` | After each iteration completes |
+| `pre-tool.sh` | Before Copilot executes a tool |
+| `on-completion.sh` | When completion promise is detected |
+| `on-network-wait.sh` | When network wait begins (for notifications) |
+
+### Environment Variables
+
+Hooks have access to these environment variables:
+
+```bash
+RALPH_ITERATION      # Current iteration number
+RALPH_MAX_ITERATIONS # Maximum iterations allowed
+RALPH_TASK_ID        # Current task ID (batch mode)
+RALPH_MODE           # "single" or "batch"
+RALPH_EXIT_CODE      # Exit code from Copilot CLI
+RALPH_PROMISE        # Completion promise (on-completion only)
+```
+
+### Example: Auto-commit Progress
+
+```bash
+# .github/hooks/post-iteration.sh
+#!/usr/bin/env bash
+git add -A && git commit -m "Ralph iteration $RALPH_ITERATION" --no-verify 2>/dev/null || true
+```
+
+### Example: Security Scan
+
+```bash
+# .github/hooks/post-iteration.sh
+#!/usr/bin/env bash
+npm audit --audit-level=high 2>/dev/null || echo "Security issues found"
+```
+
+---
+
+## 🔒 Security Considerations
+
+### Trusted Directories
+
+Copilot CLI asks to confirm trust for directories. Only launch Ralph Mode from directories you trust.
+
+**Warning**: Do not launch from:
+- Home directory
+- Directories with untrusted executable files
+- Directories with sensitive data you don't want modified
+
+### Tool Approval
+
+Ralph Mode runs with `--allow-all-tools --allow-all-paths` by default for automation. To restrict:
+
+```bash
+# Deny dangerous commands
+./ralph-loop.sh run --deny-tool 'shell(rm)' --deny-tool 'shell(git push)'
+
+# Allow only specific tools
+./ralph-loop.sh run --no-allow-tools --allow-tool 'shell(git)' --allow-tool 'write'
+```
+
+### Tool Approval Syntax
+
+| Syntax | Description |
+|--------|-------------|
+| `'shell(COMMAND)'` | Allow/deny specific shell command |
+| `'shell(git push)'` | Allow/deny specific subcommand |
+| `'shell'` | Allow/deny all shell commands |
+| `'write'` | Allow/deny file modifications |
+| `'MCP_SERVER(tool)'` | Allow/deny MCP server tool |
+
+### Risk Mitigation
+
+For maximum safety:
+1. Use a virtual machine or container
+2. Restrict network access
+3. Review hooks before running
+4. Use `--deny-tool` for dangerous commands
+
+---
+
+## 🌐 Network Resilience
+
+Ralph Mode includes **professional-grade network resilience** to handle connection interruptions gracefully. When network connectivity is lost, Ralph will automatically:
+
+1. **Detect** the disconnection
+2. **Wait** with exponential backoff
+3. **Resume** from the exact point where it stopped
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Network Resilience Flow                    │
+│                                                             │
+│   ┌────────────┐     ┌─────────────┐     ┌──────────────┐  │
+│   │  Iteration │────▶│   Network   │────▶│   Success    │  │
+│   │   Start    │     │   Check     │     │   Continue   │  │
+│   └────────────┘     └──────┬──────┘     └──────────────┘  │
+│                             │                               │
+│                      [Connection Lost]                      │
+│                             │                               │
+│                             ▼                               │
+│                    ┌─────────────┐                          │
+│                    │    Save     │                          │
+│                    │ Checkpoint  │                          │
+│                    └──────┬──────┘                          │
+│                           │                                 │
+│                           ▼                                 │
+│                    ┌─────────────┐                          │
+│                    │    Wait     │◀─────┐                   │
+│                    │  (backoff)  │      │                   │
+│                    └──────┬──────┘      │                   │
+│                           │             │                   │
+│                    [Still Down?]────────┘                   │
+│                           │                                 │
+│                    [Restored!]                              │
+│                           │                                 │
+│                           ▼                                 │
+│                    ┌─────────────┐                          │
+│                    │   Resume    │                          │
+│                    │ from Point  │                          │
+│                    └─────────────┘                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Exponential Backoff
+
+Wait times increase progressively to avoid hammering the network:
+
+| Attempt | Wait Time |
+|---------|-----------|
+| 1       | 5 seconds |
+| 2       | 10 seconds |
+| 3       | 20 seconds |
+| 4       | 40 seconds |
+| 5       | 80 seconds |
+| 6+      | 300 seconds (max) |
+
+### Checkpoint System
+
+Ralph automatically saves checkpoints at key moments:
+
+- `iteration_started` - Before each iteration begins
+- `network_disconnected` - When network loss is detected
+- `network_error` - When a network-related error occurs
+- `network_restored` - When connection is restored
+- `max_failures_reached` - When too many consecutive failures occur
+
+### CLI Options
+
+```bash
+# Default: Network resilience ENABLED
+./ralph-loop.sh run
+
+# Disable network checking (for offline work)
+./ralph-loop.sh run --no-network-check
+
+# Customize retry timing
+./ralph-loop.sh run --network-retry 10 --network-max 600
+
+# Manual network check
+./ralph-loop.sh check-network
+
+# Resume from checkpoint
+./ralph-loop.sh resume
+```
+
+### PowerShell (Windows)
+
+```powershell
+# Default: Network resilience ENABLED
+.\ralph-mode.ps1 run
+
+# Manual network check
+.\ralph-mode.ps1 check-network
+
+# Resume from checkpoint
+.\ralph-mode.ps1 resume
+```
+
+### Network Hook
+
+The `on-network-wait.sh` hook runs when network wait begins. Use it for notifications:
+
+```bash
+# .github/hooks/on-network-wait.sh
+#!/usr/bin/env bash
+echo "⚠️ Network lost at iteration $RALPH_ITERATION"
+
+# Example: Send notification
+# curl -X POST "https://ntfy.sh/my-topic" -d "Ralph waiting for network"
+```
+
+### Hosts Checked
+
+By default, Ralph checks these hosts for connectivity:
+
+1. `api.github.com` - GitHub API (primary for Copilot)
+2. `github.com` - GitHub main
+3. `1.1.1.1` - Cloudflare DNS (as fallback)
+
+### Consecutive Failure Protection
+
+If **3 consecutive iterations** fail (even with network available), Ralph will:
+
+1. Stop the loop to prevent infinite failure loops
+2. Save a checkpoint with `max_failures_reached` status
+3. Allow you to resume after investigating
+
+```bash
+# After fixing the issue, resume
+./ralph-loop.sh resume
+```
 
 ---
 
@@ -280,7 +776,10 @@ python3 ralph_mode.py status
 |---------|-------------|
 | `run` | Start the continuous loop |
 | `run --group <name>` | Run a specific task group |
+| `run --agent <name>` | Run with a specific agent |
 | `single` | Run single iteration |
+| `resume` | Resume previous session (with checkpoint support) |
+| `check-network` | Manual network connectivity test |
 | `help` | Show help |
 
 ### Options
@@ -292,27 +791,38 @@ python3 ralph_mode.py status
 --tasks-file <path>         # Path to tasks JSON file
 --tasks-dir <path>          # Path to tasks directory
 --group <name>              # Task group to run
+--auto-agents               # Enable dynamic sub-agent creation
 
 # ralph-loop.sh options
 --sleep <seconds>           # Sleep between iterations (default: 2)
---allow-tools <tools>       # Tools to allow gh copilot to use
+--agent <name>              # Custom agent to use (ralph, plan, etc.)
 --model <model>             # Model to use (e.g., gpt-5.2-codex)
+--allow-all                 # Enable all permissions (--yolo mode)
+--allow-url <domain>        # Pre-approve specific URL domain
+--no-allow-tools            # Don't auto-allow all tools
+--no-allow-paths            # Don't auto-allow all paths
 --dry-run                   # Print commands without executing
 --verbose                   # Verbose output
+
+# Network resilience options
+--no-network-check          # Disable network resilience
+--network-retry <seconds>   # Initial retry wait (default: 5)
+--network-max <seconds>     # Maximum retry wait (default: 300)
 ```
 
 ### Customizing Allowed Tools
 
-By default, Ralph allows these shell tools:
+By default, Ralph runs with `--allow-all-tools --allow-all-paths` for full automation. Customize permissions:
 
 ```bash
-shell(git,npm,node,python3,cat,ls,grep,find,mkdir,cp,mv,rm,touch,echo,head,tail,wc)
-```
+# Restrict to specific URLs only
+./ralph-loop.sh run --allow-url github.com --allow-url api.github.com
 
-Customize with:
+# Disable auto-approval of tools
+./ralph-loop.sh run --no-allow-tools
 
-```bash
-./ralph-loop.sh run --allow-tools "shell(git,npm,docker)"
+# Full unrestricted mode
+./ralph-loop.sh run --allow-all
 ```
 
 ---
@@ -514,10 +1024,44 @@ your-project/
 │   ├── prompt.md             # The current task prompt
 │   ├── INSTRUCTIONS.md       # Instructions for AI
 │   ├── history.jsonl         # Log of all iterations
-│   ├── output.txt            # Last gh copilot output
+│   ├── output.txt            # Last Copilot CLI output
+│   ├── session.json          # Session info for resume
+│   ├── checkpoint.json       # Network resilience checkpoint
 │   └── tasks/                # Task files (batch mode)
 │       ├── 01-HXA-001.md
 │       └── 02-HXA-002.md
+│
+├── .ralph-mode-config/       # Ralph configuration (optional)
+│   ├── config.json           # Default settings
+│   └── mcp-config.json       # MCP server configuration
+│
+├── .github/                  # GitHub/Copilot integration
+│   ├── copilot-instructions.md  # Repository-wide instructions
+│   ├── agents/               # Custom agent profiles
+│   │   ├── ralph.md
+│   │   ├── plan.md
+│   │   ├── code-review.md
+│   │   ├── task.md
+│   │   ├── explore.md
+│   │   └── agent-creator.agent.md
+│   ├── hooks/                # Lifecycle hooks
+│   │   ├── pre-iteration.sh
+│   │   ├── post-iteration.sh
+│   │   ├── pre-tool.sh
+│   │   ├── on-completion.sh
+│   │   └── on-network-wait.sh
+│   ├── instructions/         # Path-specific instructions
+│   │   ├── ralph-mode-python.instructions.md
+│   │   ├── shell-scripts.instructions.md
+│   │   ├── task-files.instructions.md
+│   │   └── tests.instructions.md
+│   └── skills/               # Agent skills (each in own folder)
+│       ├── ralph-iteration/
+│       │   └── SKILL.md
+│       ├── test-runner/
+│       │   └── SKILL.md
+│       └── code-analysis/
+│           └── SKILL.md
 │
 ├── tasks/                    # Your task definitions (recommended)
 │   ├── HXA-001-feature.md
@@ -526,10 +1070,135 @@ your-project/
 │       ├── backend.json
 │       └── frontend.json
 │
+├── tests/                    # Test files
+│   ├── test_ralph_mode.py
+│   ├── test_network_integration.ps1
+│   ├── test_network_resilience.ps1
+│   ├── test_network_resilience.sh
+│   └── demo_network_resilience.ps1
+│
 └── .ralph-rules/             # Custom rules (optional)
     ├── safety.mdc
     └── coding-standards.mdc
 ```
+
+---
+
+## 🔌 MCP Server Integration
+
+Ralph Mode supports [MCP (Model Context Protocol)](https://docs.github.com/en/copilot/customizing-copilot/extending-copilot/extending-copilot-coding-agent-with-mcp) servers for extended functionality.
+
+### Configuration
+
+MCP servers are configured using JSON format with the `mcpServers` object:
+
+**Project config**: `.ralph-mode-config/mcp-config.json`
+
+### JSON Configuration Format
+
+```json
+{
+  "mcpServers": {
+    "server-name": {
+      "type": "local|stdio|http|sse",
+      "tools": ["tool1", "tool2"],
+      ...
+    }
+  }
+}
+```
+
+### Required Keys
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `tools` | string[] | Tools to enable (`["*"]` for all) |
+| `type` | string | `"local"`, `"stdio"`, `"http"`, or `"sse"` |
+
+### Local MCP Server Keys
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `command` | string | Command to start the server |
+| `args` | string[] | Arguments for the command |
+| `env` | object | Environment variables (use `COPILOT_MCP_` prefix) |
+
+### Remote MCP Server Keys
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `url` | string | Server URL |
+| `headers` | object | Request headers |
+
+### Example: GitHub MCP Server (Default)
+
+```json
+{
+  "mcpServers": {
+    "github-mcp-server": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/readonly",
+      "tools": ["*"],
+      "headers": {
+        "X-MCP-Toolsets": "repos,issues,users,pull_requests,code_security,actions"
+      }
+    }
+  }
+}
+```
+
+### Example: Local MCP Server (Sentry)
+
+```json
+{
+  "mcpServers": {
+    "sentry": {
+      "type": "local",
+      "command": "npx",
+      "args": ["@sentry/mcp-server@latest", "--host=$SENTRY_HOST"],
+      "tools": ["get_issue_details", "get_issue_summary"],
+      "env": {
+        "SENTRY_HOST": "COPILOT_MCP_SENTRY_HOST",
+        "SENTRY_ACCESS_TOKEN": "COPILOT_MCP_SENTRY_ACCESS_TOKEN"
+      }
+    }
+  }
+}
+```
+
+### Example: Remote MCP Server (Cloudflare)
+
+```json
+{
+  "mcpServers": {
+    "cloudflare": {
+      "type": "sse",
+      "url": "https://docs.mcp.cloudflare.com/sse",
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+### Environment Variables
+
+For MCP servers requiring secrets:
+- Prefix all environment variables with `COPILOT_MCP_`
+- Reference in config: `"API_KEY": "COPILOT_MCP_API_KEY"`
+- Or use `$COPILOT_MCP_API_KEY` in string values
+
+### Available Toolsets (GitHub MCP)
+
+| Toolset | Description |
+|---------|-------------|
+| `repos` | Repository operations |
+| `issues` | Issue management |
+| `users` | User information |
+| `pull_requests` | PR operations |
+| `code_security` | Security scanning |
+| `secret_protection` | Secret scanning |
+| `actions` | GitHub Actions |
+| `web_search` | Web search |
 
 ---
 
@@ -554,12 +1223,29 @@ your-project/
 ## 🧪 Testing
 
 ```bash
-# Run all tests
+# Run all unit tests
 python3 -m pytest tests/ -v
 
-# Run specific test
+# Run specific test file
 python3 -m pytest tests/test_ralph_mode.py -v
+
+# Test network resilience (PowerShell)
+.\tests\test_network_integration.ps1
+
+# Test network resilience demo
+.\tests\demo_network_resilience.ps1
+
+# Test network resilience (Bash)
+./tests/test_network_resilience.sh
 ```
+
+### Test Coverage
+
+| Test Suite | Description |
+|------------|-------------|
+| `test_ralph_mode.py` | Core functionality (38 tests) |
+| `test_network_integration.ps1` | Network resilience integration |
+| `demo_network_resilience.ps1` | Live network outage simulation |
 
 ---
 
@@ -604,14 +1290,20 @@ Press Ctrl+C to stop the loop
 ║          🔄 Ralph Iteration 1                            ║
 ╚══════════════════════════════════════════════════════════╝
 
-🤖 Running gh copilot...
+🌐 Checking network connectivity...
+✅ Network is available
+
+🤖 Running copilot...
 [AI creates calculator.py]
 
 ╔══════════════════════════════════════════════════════════╗
 ║          🔄 Ralph Iteration 2                            ║
 ╚══════════════════════════════════════════════════════════╝
 
-🤖 Running gh copilot...
+🌐 Checking network connectivity...
+✅ Network is available
+
+🤖 Running copilot...
 [AI creates test_calculator.py]
 [AI runs tests - they pass]
 
@@ -624,6 +1316,29 @@ Press Ctrl+C to stop the loop
 🏁 Ralph loop finished after 2 iterations
 ```
 
+### Example: Network Resilience in Action
+
+```bash
+╔══════════════════════════════════════════════════════════╗
+║          🔄 Ralph Iteration 5                            ║
+╚══════════════════════════════════════════════════════════╝
+
+🌐 Checking network connectivity...
+
+═══════════════════════════════════════════════════════════════
+🔌 Network connection lost - waiting for reconnection...
+═══════════════════════════════════════════════════════════════
+
+[2026-02-02 15:31:49] Attempt 1: Waiting 5s for network... (total: 0s)
+[2026-02-02 15:31:54] Attempt 2: Waiting 10s for network... (total: 5s)
+[2026-02-02 15:32:04] Attempt 3: Waiting 20s for network... (total: 15s)
+
+[2026-02-02 15:32:24] ✅ Network connection restored after 35s!
+
+🤖 Running copilot... (resuming)
+[AI continues work from where it stopped]
+```
+
 ---
 
 ## 🔗 Credits
@@ -631,6 +1346,7 @@ Press Ctrl+C to stop the loop
 - Original technique: [ghuntley.com/ralph](https://ghuntley.com/ralph/)
 - Inspiration: Geoffrey Huntley's Ralph Wiggum approach
 - GitHub Copilot: [github.com/features/copilot](https://github.com/features/copilot)
+- GitHub Copilot CLI: [docs.github.com/copilot-cli](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli)
 
 ---
 

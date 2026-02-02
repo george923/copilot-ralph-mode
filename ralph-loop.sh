@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 #
-# ralph-loop.sh - The actual Ralph loop runner for gh copilot CLI
+# ralph-loop.sh - The actual Ralph loop runner for GitHub Copilot CLI
 # 
-# This script runs the continuous iteration loop with gh copilot.
+# This script runs the continuous iteration loop with Copilot CLI.
 # It's the "real Ralph" - a bash while loop that keeps running until done.
+#
+# Fully compatible with GitHub Copilot CLI features:
+# - Custom agents
+# - Plan mode
+# - Context management
+# - MCP servers
+# - Session resume
+# - Network resilience with automatic retry
 #
 # Author: Sepehr Bayat
 # Repository: https://github.com/sepehrbayat/copilot-ralph-mode
@@ -16,6 +24,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 # Defaults
@@ -24,38 +33,279 @@ STATE_FILE="$RALPH_DIR/state.json"
 PROMPT_FILE="$RALPH_DIR/prompt.md"
 OUTPUT_FILE="$RALPH_DIR/output.txt"
 HISTORY_FILE="$RALPH_DIR/history.jsonl"
+SESSION_FILE="$RALPH_DIR/session.json"
+CHECKPOINT_FILE="$RALPH_DIR/checkpoint.json"
 SLEEP_BETWEEN=2
+
+# Network resilience settings
+NETWORK_CHECK_HOSTS=("api.github.com" "github.com" "1.1.1.1")
+NETWORK_CHECK_TIMEOUT=5
+NETWORK_RETRY_INITIAL=5
+NETWORK_RETRY_MAX=300
+NETWORK_RETRY_MULTIPLIER=2
+MAX_CONSECUTIVE_FAILURES=3
 
 # Default model configuration
 DEFAULT_MODEL="gpt-5.2-codex"
 FALLBACK_MODEL="auto"
 
+# Permission flags
+ALLOW_ALL_TOOLS=true
+ALLOW_ALL_PATHS=true
+ALLOW_ALL_URLS=false
+ALLOWED_URLS=""
+DENIED_TOOLS=""
+ALLOWED_TOOLS_EXTRA=""
+
+# Hooks directory
+HOOKS_DIR=".github/hooks"
+
 # Add copilot to PATH if needed
 export PATH="$HOME/.local/bin:$PATH"
 
-# Copilot CLI command and options
+# Copilot CLI command
 COPILOT_CMD="copilot"
-COPILOT_OPTS="--allow-all-tools --allow-all-paths"
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ═══════════════════════════════════════════════════════════════
+# Network Resilience Functions
+# ═══════════════════════════════════════════════════════════════
+
+# Check if internet is available
+check_internet() {
+    # Check for mock file first (for testing)
+    if [[ -f "$RALPH_DIR/mock_network_down" ]]; then
+        return 1
+    fi
+    
+    local host
+    for host in "${NETWORK_CHECK_HOSTS[@]}"; do
+        if ping -c 1 -W "$NETWORK_CHECK_TIMEOUT" "$host" &>/dev/null 2>&1; then
+            return 0
+        fi
+        # Fallback to curl if ping doesn't work
+        if curl -s --connect-timeout "$NETWORK_CHECK_TIMEOUT" --head "https://$host" &>/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Wait for internet connection with exponential backoff
+wait_for_internet() {
+    local wait_time=$NETWORK_RETRY_INITIAL
+    local total_waited=0
+    local attempt=1
+    
+    echo -e "\n${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}🔌 Network connection lost - waiting for reconnection...${NC}"
+    echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}\n"
+    
+    # Save checkpoint before waiting
+    save_checkpoint "network_disconnected"
+    
+    while ! check_internet; do
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        echo -e "${MAGENTA}[$timestamp]${NC} Attempt $attempt: Waiting ${wait_time}s for network... (total: ${total_waited}s)"
+        
+        sleep "$wait_time"
+        total_waited=$((total_waited + wait_time))
+        attempt=$((attempt + 1))
+        
+        # Exponential backoff with max limit
+        wait_time=$((wait_time * NETWORK_RETRY_MULTIPLIER))
+        if [[ $wait_time -gt $NETWORK_RETRY_MAX ]]; then
+            wait_time=$NETWORK_RETRY_MAX
+        fi
+        
+        # Run hook if exists
+        run_hook "on-network-wait" 2>/dev/null || true
+    done
+    
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "\n${GREEN}[$timestamp] ✅ Network connection restored after ${total_waited}s!${NC}\n"
+    
+    # Small delay to ensure connection is stable
+    sleep 2
+    
+    # Update checkpoint
+    save_checkpoint "network_restored"
+    
+    return 0
+}
+
+# Save checkpoint for resume capability
+save_checkpoint() {
+    local status="$1"
+    local iteration=$(get_iteration)
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    
+    cat > "$CHECKPOINT_FILE" << EOF
+{
+    "status": "$status",
+    "iteration": $iteration,
+    "timestamp": "$timestamp",
+    "pid": $$,
+    "last_output_lines": $(tail -n 20 "$OUTPUT_FILE" 2>/dev/null | jq -Rs . || echo '""')
+}
+EOF
+}
+
+# Check if we should resume from checkpoint
+check_checkpoint() {
+    if [[ -f "$CHECKPOINT_FILE" ]]; then
+        local status=$(jq -r '.status // empty' "$CHECKPOINT_FILE" 2>/dev/null || echo "")
+        local checkpoint_iter=$(jq -r '.iteration // 0' "$CHECKPOINT_FILE" 2>/dev/null || echo "0")
+        local current_iter=$(get_iteration)
+        
+        if [[ "$status" == "network_disconnected" || "$status" == "iteration_failed" ]]; then
+            echo -e "${YELLOW}📌 Found checkpoint at iteration $checkpoint_iter (status: $status)${NC}"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Clear checkpoint
+clear_checkpoint() {
+    rm -f "$CHECKPOINT_FILE" 2>/dev/null || true
+}
+
+# Execute with network resilience
+execute_with_resilience() {
+    local cmd="$1"
+    local max_retries=${2:-3}
+    local retry_count=0
+    local exit_code=0
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        # Check internet before execution
+        if ! check_internet; then
+            wait_for_internet
+        fi
+        
+        # Save checkpoint before execution
+        save_checkpoint "executing"
+        
+        # Execute the command
+        set +e
+        eval "$cmd"
+        exit_code=$?
+        set -e
+        
+        if [[ $exit_code -eq 0 ]]; then
+            clear_checkpoint
+            return 0
+        fi
+        
+        # Check if it's a network error (common exit codes)
+        # Exit codes: 6=couldn't resolve host, 7=couldn't connect, 28=timeout
+        if [[ $exit_code -eq 6 || $exit_code -eq 7 || $exit_code -eq 28 || $exit_code -eq 56 ]]; then
+            echo -e "${YELLOW}⚠️ Network error detected (exit code: $exit_code)${NC}"
+            save_checkpoint "network_error"
+            
+            if ! check_internet; then
+                wait_for_internet
+                retry_count=$((retry_count + 1))
+                echo -e "${CYAN}🔄 Retrying... (attempt $((retry_count + 1))/$max_retries)${NC}"
+                continue
+            fi
+        fi
+        
+        # Non-network error
+        save_checkpoint "iteration_failed"
+        return $exit_code
+    done
+    
+    echo -e "${RED}❌ Max retries ($max_retries) exceeded${NC}"
+    return 1
+}
+
+# ═══════════════════════════════════════════════════════════════
+# End Network Resilience Functions
+# ═══════════════════════════════════════════════════════════════
+
+# Run a hook if it exists
+run_hook() {
+    local hook_name="$1"
+    local hook_file="$HOOKS_DIR/$hook_name.sh"
+    
+    if [[ -f "$hook_file" && -x "$hook_file" ]]; then
+        echo -e "${BLUE}🪝 Running hook: $hook_name${NC}"
+        "$hook_file" || true
+    fi
+}
 
 # Help message
 show_help() {
     cat << EOF
 ${GREEN}🔄 Ralph Loop Runner${NC}
 
-Runs the actual Ralph loop with gh copilot CLI.
+Runs the actual Ralph loop with GitHub Copilot CLI.
+Fully compatible with Copilot CLI features.
 
 ${YELLOW}USAGE:${NC}
     ralph-loop.sh run [options]          # Start the loop
     ralph-loop.sh single [options]       # Run single iteration
+    ralph-loop.sh resume [options]       # Resume previous session
+    ralph-loop.sh check-network          # Check network connectivity
     ralph-loop.sh help                   # Show this help
 
 ${YELLOW}OPTIONS:${NC}
     --sleep <seconds>       Sleep between iterations (default: 2)
+    --agent <name>          Use a custom agent (ralph, plan, task, etc.)
+    --model <model>         Override the model
+    --allow-all             Enable all permissions (--yolo mode)
+    --allow-url <domain>    Pre-approve specific URL domain
+    --allow-tool <tool>     Allow specific tool (e.g., 'shell(git)')
+    --deny-tool <tool>      Deny specific tool (takes precedence)
+    --no-allow-tools        Don't auto-allow all tools
+    --no-allow-paths        Don't auto-allow all paths
+    --no-network-check      Disable network resilience (not recommended)
+    --network-retry <sec>   Initial retry wait time (default: 5)
+    --network-max <sec>     Max retry wait time (default: 300)
     --dry-run               Print commands without executing
     --verbose               Verbose output
+
+${YELLOW}NETWORK RESILIENCE:${NC}
+    Ralph automatically handles network interruptions:
+    - Detects connection loss during execution
+    - Waits with exponential backoff until reconnected
+    - Resumes from the exact point of interruption
+    - Saves checkpoints for recovery
+    
+    Hooks for network events:
+    - on-network-wait.sh    Called during network wait
+
+${YELLOW}TOOL APPROVAL SYNTAX:${NC}
+    --allow-tool 'shell(COMMAND)'       Allow shell command
+    --allow-tool 'shell(git push)'      Allow specific git subcommand
+    --allow-tool 'shell'                Allow all shell commands
+    --allow-tool 'write'                Allow file modifications
+    --allow-tool 'MCP_SERVER_NAME'      Allow all tools from MCP server
+    --deny-tool 'shell(rm)'             Deny rm command
+
+${YELLOW}COPILOT CLI INTEGRATION:${NC}
+    Slash commands available during interactive mode:
+    /context    - View current token usage
+    /compact    - Compress conversation history
+    /usage      - View session statistics
+    /review     - Review code changes
+    /agent      - Select a custom agent
+    /model      - Change the model
+    /cwd        - Change working directory
+    /resume     - Resume a previous session
+    /mcp add    - Add an MCP server
+
+${YELLOW}HOOKS:${NC}
+    Custom hooks in .github/hooks/:
+    - pre-iteration.sh    Run before each iteration
+    - post-iteration.sh   Run after each iteration
+    - pre-tool.sh         Run before tool execution
+    - on-completion.sh    Run when task completes
+    - on-network-wait.sh  Run during network wait
 
 ${YELLOW}EXAMPLES:${NC}
     # First, enable Ralph mode
@@ -64,8 +314,28 @@ ${YELLOW}EXAMPLES:${NC}
     # Then run the loop
     ./ralph-loop.sh run
     
-    # Or run single iteration manually
+    # Use a specific agent
+    ./ralph-loop.sh run --agent ralph
+    
+    # Allow git but deny rm
+    ./ralph-loop.sh run --allow-tool 'shell(git)' --deny-tool 'shell(rm)'
+    
+    # Run single iteration manually
     ./ralph-loop.sh single
+    
+    # Resume previous session
+    ./ralph-loop.sh resume
+    
+    # Check network connectivity
+    ./ralph-loop.sh check-network
+
+${YELLOW}CUSTOM AGENTS:${NC}
+    Available in .github/agents/:
+    - ralph       Main Ralph Mode iteration agent
+    - plan        Create implementation plans
+    - code-review Review changes
+    - task        Run tests and builds
+    - explore     Quick codebase exploration
 
 ${YELLOW}REQUIREMENTS:${NC}
     - GitHub Copilot CLI (https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli)
@@ -116,9 +386,56 @@ get_fallback_model() {
     echo "${fallback:-$FALLBACK_MODEL}"
 }
 
+# Build copilot CLI options based on flags
+build_copilot_opts() {
+    local opts=""
+    
+    # Permission flags
+    if [[ "$ALLOW_ALL_TOOLS" == "true" ]]; then
+        opts="$opts --allow-all-tools"
+    fi
+    
+    if [[ "$ALLOW_ALL_PATHS" == "true" ]]; then
+        opts="$opts --allow-all-paths"
+    fi
+    
+    if [[ "$ALLOW_ALL_URLS" == "true" ]]; then
+        opts="$opts --allow-all-urls"
+    fi
+    
+    # Pre-approved URLs
+    if [[ -n "$ALLOWED_URLS" ]]; then
+        for url in $ALLOWED_URLS; do
+            opts="$opts --allow-url $url"
+        done
+    fi
+    
+    # Denied tools (--deny-tool takes precedence)
+    if [[ -n "$DENIED_TOOLS" ]]; then
+        for tool in $DENIED_TOOLS; do
+            opts="$opts --deny-tool '$tool'"
+        done
+    fi
+    
+    # Additional allowed tools
+    if [[ -n "$ALLOWED_TOOLS_EXTRA" ]]; then
+        for tool in $ALLOWED_TOOLS_EXTRA; do
+            opts="$opts --allow-tool '$tool'"
+        done
+    fi
+    
+    echo "$opts"
+}
+
 # Get prompt
 get_prompt() {
     cat "$PROMPT_FILE" 2>/dev/null || echo ""
+}
+
+# Check if auto_agents is enabled
+is_auto_agents_enabled() {
+    local auto_agents=$(get_state "auto_agents")
+    [[ "$auto_agents" == "true" ]]
 }
 
 # Build the full context for gh copilot
@@ -170,14 +487,55 @@ When the task is GENUINELY COMPLETE, output exactly:
 Task $task_num of $task_total: $task_id
 "
     fi
+
+    if is_auto_agents_enabled; then
+        context="$context
+## 🤖 Auto-Agents Enabled
+
+You can dynamically create specialized sub-agents during this task.
+
+### How to Create Sub-Agents
+
+Create a \`.agent.md\` file in \`.github/agents/\`:
+
+\`\`\`markdown
+---
+name: my-custom-agent
+description: What this agent does
+tools:
+  - read_file
+  - edit_file
+  - run_in_terminal
+---
+
+# Instructions for this agent
+\`\`\`
+
+Then invoke with: \`@my-custom-agent <task>\`
+
+### When to Create Sub-Agents
+- Complex subtasks needing focused context
+- Repetitive operations
+- Code review, testing, or refactoring tasks
+
+### Agent Design Guidelines
+- Single Responsibility: One thing well
+- Minimal Tools: Only what's needed
+- Clear Instructions: Be explicit
+
+Use \`@agent-creator\` for guidance.
+"
+    fi
     
     echo "$context"
 }
 
-# Run single iteration with gh copilot
+# Run single iteration with Copilot CLI
 run_single() {
     local dry_run="${1:-false}"
     local verbose="${2:-false}"
+    local agent="${3:-}"
+    local network_check="${4:-true}"
     
     check_active
     
@@ -186,11 +544,34 @@ run_single() {
     local promise=$(get_promise)
     local model=$(get_model)
     local fallback=$(get_fallback_model)
+    local copilot_opts=$(build_copilot_opts)
+    local mode=$(get_state "mode")
+    local task_id=$(get_state "current_task_id")
+    
+    # Export environment variables for hooks
+    export RALPH_ITERATION="$iteration"
+    export RALPH_MAX_ITERATIONS="$max_iter"
+    export RALPH_TASK_ID="$task_id"
+    export RALPH_MODE="$mode"
     
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║          🔄 Ralph Iteration $iteration                              ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
     echo -e "${CYAN}Model: $model (fallback: $fallback)${NC}"
+    if [[ -n "$agent" ]]; then
+        echo -e "${CYAN}Agent: $agent${NC}"
+    fi
+    
+    # Network check before starting
+    if [[ "$network_check" == "true" ]]; then
+        if ! check_internet; then
+            echo -e "${YELLOW}⚠️ Network check: No connection detected${NC}"
+            wait_for_internet
+        fi
+    fi
+    
+    # Run pre-iteration hook
+    run_hook "pre-iteration"
     
     # Build context/prompt
     local context=$(build_context)
@@ -207,10 +588,16 @@ run_single() {
         model_opts="--model $model"
     fi
     
-    # Run copilot CLI
+    # Build agent options
+    local agent_opts=""
+    if [[ -n "$agent" ]]; then
+        agent_opts="--agent=$agent"
+    fi
+    
+    # Run Copilot CLI
     echo -e "${BLUE}🤖 Running GitHub Copilot CLI...${NC}"
     
-    local cmd="$COPILOT_CMD -p \"$context\" $COPILOT_OPTS $model_opts"
+    local cmd="$COPILOT_CMD -p \"$context\" $copilot_opts $model_opts $agent_opts"
     
     if [[ "$dry_run" == "true" ]]; then
         echo -e "${YELLOW}[DRY RUN] Would execute:${NC}"
@@ -221,28 +608,70 @@ run_single() {
     # Execute and capture output
     mkdir -p "$RALPH_DIR"
     
+    # Save checkpoint before execution
+    save_checkpoint "iteration_started"
+    
     # Try with primary model, fallback if needed
     local exit_code=0
-    if timeout 600 $COPILOT_CMD -p "$context" $COPILOT_OPTS $model_opts 2>&1 | tee "$OUTPUT_FILE"; then
-        echo ""
-    else
-        exit_code=$?
-        # Check if model not available error
-        if grep -q "model.*not available\|invalid model\|Model.*not found" "$OUTPUT_FILE" 2>/dev/null; then
-            echo -e "${YELLOW}⚠️ Model '$model' not available, trying fallback '$fallback'...${NC}"
-            if [[ "$fallback" == "auto" ]]; then
-                model_opts=""
-            else
-                model_opts="--model $fallback"
-            fi
-            if timeout 600 $COPILOT_CMD -p "$context" $COPILOT_OPTS $model_opts 2>&1 | tee "$OUTPUT_FILE"; then
-                echo ""
-                exit_code=0
-            fi
+    local max_network_retries=3
+    local network_retry_count=0
+    
+    while [[ $network_retry_count -lt $max_network_retries ]]; do
+        if timeout 600 $COPILOT_CMD -p "$context" $copilot_opts $model_opts $agent_opts 2>&1 | tee "$OUTPUT_FILE"; then
+            echo ""
+            exit_code=0
+            break
         else
-            echo -e "${YELLOW}⚠️ Copilot CLI exited with non-zero status${NC}"
+            exit_code=$?
+            
+            # Check if it's a network error
+            if [[ $exit_code -eq 6 || $exit_code -eq 7 || $exit_code -eq 28 || $exit_code -eq 56 ]] || \
+               grep -qi "network\|connection\|timeout\|unreachable\|resolve" "$OUTPUT_FILE" 2>/dev/null; then
+                echo -e "${YELLOW}⚠️ Network error detected (exit code: $exit_code)${NC}"
+                
+                if [[ "$network_check" == "true" ]]; then
+                    save_checkpoint "network_error"
+                    wait_for_internet
+                    network_retry_count=$((network_retry_count + 1))
+                    echo -e "${CYAN}🔄 Retrying iteration... (attempt $((network_retry_count + 1))/$max_network_retries)${NC}"
+                    continue
+                fi
+            fi
+            
+            # Check if model not available error
+            if grep -q "model.*not available\|invalid model\|Model.*not found" "$OUTPUT_FILE" 2>/dev/null; then
+                echo -e "${YELLOW}⚠️ Model '$model' not available, trying fallback '$fallback'...${NC}"
+                if [[ "$fallback" == "auto" ]]; then
+                    model_opts=""
+                else
+                    model_opts="--model $fallback"
+                fi
+                if timeout 600 $COPILOT_CMD -p "$context" $copilot_opts $model_opts $agent_opts 2>&1 | tee "$OUTPUT_FILE"; then
+                    echo ""
+                    exit_code=0
+                fi
+            else
+                echo -e "${YELLOW}⚠️ Copilot CLI exited with non-zero status${NC}"
+            fi
+            break
         fi
+    done
+    
+    # Clear checkpoint on success
+    if [[ $exit_code -eq 0 ]]; then
+        clear_checkpoint
+    else
+        save_checkpoint "iteration_failed"
     fi
+    
+    # Export exit code for post-iteration hook
+    export RALPH_EXIT_CODE="$exit_code"
+    
+    # Run post-iteration hook
+    run_hook "post-iteration"
+    
+    # Save session info for resume capability
+    echo "{\"last_iteration\": $iteration, \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$SESSION_FILE"
     
     # Check for completion promise in output
     if [[ -n "$promise" ]] && grep -q "<promise>$promise</promise>" "$OUTPUT_FILE" 2>/dev/null; then
@@ -250,6 +679,12 @@ run_single() {
         echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
         echo -e "${GREEN}✅ COMPLETION PROMISE DETECTED!${NC}"
         echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+        
+        # Export for completion hook
+        export RALPH_PROMISE="$promise"
+        
+        # Run completion hook
+        run_hook "on-completion"
         
         # Complete the task
         python3 "$SCRIPT_DIR/ralph_mode.py" complete "$(cat "$OUTPUT_FILE")" || true
@@ -270,6 +705,8 @@ run_loop() {
     local dry_run="${1:-false}"
     local verbose="${2:-false}"
     local sleep_time="${3:-$SLEEP_BETWEEN}"
+    local agent="${4:-}"
+    local network_check="${5:-true}"
     
     check_active
     
@@ -278,15 +715,38 @@ run_loop() {
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${CYAN}Press Ctrl+C to stop the loop${NC}"
+    echo -e "${CYAN}Copilot CLI features available: /context, /compact, /usage, /review${NC}"
+    if [[ "$network_check" == "true" ]]; then
+        echo -e "${CYAN}Network resilience: ENABLED (auto-retry on connection loss)${NC}"
+    fi
     echo ""
+    
+    # Check for checkpoint from previous interrupted session
+    if check_checkpoint; then
+        echo -e "${YELLOW}📌 Resuming from checkpoint...${NC}"
+    fi
+    
+    # Initial network check
+    if [[ "$network_check" == "true" ]]; then
+        echo -e "${BLUE}🌐 Checking network connectivity...${NC}"
+        if check_internet; then
+            echo -e "${GREEN}✅ Network connection verified${NC}"
+        else
+            echo -e "${YELLOW}⚠️ No network connection${NC}"
+            wait_for_internet
+        fi
+        echo ""
+    fi
     
     local iteration=1
     local max_iter=$(get_max_iterations)
+    local consecutive_failures=0
     
     while true; do
         # Check if still active
         if [[ ! -f "$STATE_FILE" ]]; then
             echo -e "${GREEN}✅ Ralph mode completed or disabled${NC}"
+            clear_checkpoint
             break
         fi
         
@@ -295,13 +755,29 @@ run_loop() {
         # Check max iterations
         if [[ "$max_iter" -gt 0 ]] && [[ "$iteration" -gt "$max_iter" ]]; then
             echo -e "${YELLOW}⚠️ Max iterations ($max_iter) reached${NC}"
+            clear_checkpoint
             break
         fi
         
-        # Run single iteration
-        if ! run_single "$dry_run" "$verbose"; then
-            echo -e "${YELLOW}Loop stopped${NC}"
-            break
+        # Run single iteration with network check
+        if run_single "$dry_run" "$verbose" "$agent" "$network_check"; then
+            consecutive_failures=0
+            clear_checkpoint
+        else
+            consecutive_failures=$((consecutive_failures + 1))
+            echo -e "${YELLOW}⚠️ Iteration failed (consecutive failures: $consecutive_failures/$MAX_CONSECUTIVE_FAILURES)${NC}"
+            
+            if [[ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]]; then
+                echo -e "${RED}❌ Too many consecutive failures. Stopping loop.${NC}"
+                echo -e "${CYAN}💡 You can resume later with: ./ralph-loop.sh resume${NC}"
+                save_checkpoint "max_failures_reached"
+                break
+            fi
+            
+            # Check network before retrying
+            if [[ "$network_check" == "true" ]] && ! check_internet; then
+                wait_for_internet
+            fi
         fi
         
         # Sleep between iterations
@@ -315,6 +791,87 @@ run_loop() {
     echo -e "${GREEN}🏁 Ralph loop finished${NC}"
 }
 
+# Resume previous session
+run_resume() {
+    local verbose="${1:-false}"
+    local network_check="${2:-true}"
+    
+    # First check for checkpoint
+    if [[ -f "$CHECKPOINT_FILE" ]]; then
+        echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${GREEN}║       🔄 RESUMING FROM CHECKPOINT                        ║${NC}"
+        echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        
+        local checkpoint_status=$(jq -r '.status // "unknown"' "$CHECKPOINT_FILE" 2>/dev/null || echo "unknown")
+        local checkpoint_iter=$(jq -r '.iteration // 0' "$CHECKPOINT_FILE" 2>/dev/null || echo "0")
+        local checkpoint_time=$(jq -r '.timestamp // "unknown"' "$CHECKPOINT_FILE" 2>/dev/null || echo "unknown")
+        
+        echo -e "${CYAN}Checkpoint status: $checkpoint_status${NC}"
+        echo -e "${CYAN}Iteration: $checkpoint_iter${NC}"
+        echo -e "${CYAN}Timestamp: $checkpoint_time${NC}"
+        echo ""
+        
+        # If it was a network error, wait for network first
+        if [[ "$checkpoint_status" == "network_disconnected" || "$checkpoint_status" == "network_error" ]]; then
+            if [[ "$network_check" == "true" ]] && ! check_internet; then
+                wait_for_internet
+            fi
+        fi
+        
+        # Continue the loop
+        run_loop "false" "$verbose" "$SLEEP_BETWEEN" "" "$network_check"
+        return $?
+    fi
+    
+    if [[ ! -f "$SESSION_FILE" ]]; then
+        echo -e "${YELLOW}⚠️ No previous session found to resume${NC}"
+        echo "Start a new session with: ./ralph-loop.sh run"
+        return 1
+    fi
+    
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║           🔄 RESUMING RALPH SESSION                      ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    
+    local last_iteration=$(jq -r '.last_iteration // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+    local last_timestamp=$(jq -r '.timestamp // "unknown"' "$SESSION_FILE" 2>/dev/null || echo "unknown")
+    
+    echo -e "${CYAN}Last iteration: $last_iteration${NC}"
+    echo -e "${CYAN}Last active: $last_timestamp${NC}"
+    echo ""
+    
+    # Continue the loop
+    run_loop "false" "$verbose" "$SLEEP_BETWEEN" "" "$network_check"
+}
+
+# Check network command
+check_network_cmd() {
+    echo -e "${BLUE}🌐 Checking network connectivity...${NC}"
+    echo ""
+    
+    for host in "${NETWORK_CHECK_HOSTS[@]}"; do
+        echo -n "  Testing $host... "
+        if ping -c 1 -W "$NETWORK_CHECK_TIMEOUT" "$host" &>/dev/null 2>&1; then
+            echo -e "${GREEN}✅ OK (ping)${NC}"
+        elif curl -s --connect-timeout "$NETWORK_CHECK_TIMEOUT" --head "https://$host" &>/dev/null 2>&1; then
+            echo -e "${GREEN}✅ OK (https)${NC}"
+        else
+            echo -e "${RED}❌ FAILED${NC}"
+        fi
+    done
+    
+    echo ""
+    if check_internet; then
+        echo -e "${GREEN}✅ Network is available${NC}"
+        return 0
+    else
+        echo -e "${RED}❌ Network is NOT available${NC}"
+        return 1
+    fi
+}
+
 # Parse arguments
 main() {
     local cmd="${1:-help}"
@@ -323,6 +880,9 @@ main() {
     local dry_run=false
     local verbose=false
     local sleep_time=$SLEEP_BETWEEN
+    local agent=""
+    local model_override=""
+    local network_check=true
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -338,8 +898,55 @@ main() {
                 sleep_time="$2"
                 shift 2
                 ;;
+            --agent)
+                agent="$2"
+                shift 2
+                ;;
+            --model)
+                model_override="$2"
+                shift 2
+                ;;
+            --allow-all|--yolo)
+                ALLOW_ALL_TOOLS=true
+                ALLOW_ALL_PATHS=true
+                ALLOW_ALL_URLS=true
+                shift
+                ;;
+            --allow-url)
+                ALLOWED_URLS="$ALLOWED_URLS $2"
+                shift 2
+                ;;
+            --allow-tool)
+                ALLOWED_TOOLS_EXTRA="$ALLOWED_TOOLS_EXTRA $2"
+                shift 2
+                ;;
+            --deny-tool)
+                DENIED_TOOLS="$DENIED_TOOLS $2"
+                shift 2
+                ;;
+            --no-allow-tools)
+                ALLOW_ALL_TOOLS=false
+                shift
+                ;;
+            --no-allow-paths)
+                ALLOW_ALL_PATHS=false
+                shift
+                ;;
+            --no-network-check)
+                network_check=false
+                shift
+                ;;
+            --network-retry)
+                NETWORK_RETRY_INITIAL="$2"
+                shift 2
+                ;;
+            --network-max)
+                NETWORK_RETRY_MAX="$2"
+                shift 2
+                ;;
             --copilot-opts)
-                COPILOT_OPTS="$2"
+                # Legacy support - parse into new flags
+                echo -e "${YELLOW}⚠️ --copilot-opts is deprecated, use individual flags instead${NC}"
                 shift 2
                 ;;
             *)
@@ -351,10 +958,16 @@ main() {
     
     case "$cmd" in
         run|loop)
-            run_loop "$dry_run" "$verbose" "$sleep_time"
+            run_loop "$dry_run" "$verbose" "$sleep_time" "$agent" "$network_check"
             ;;
         single|once)
-            run_single "$dry_run" "$verbose"
+            run_single "$dry_run" "$verbose" "$agent" "$network_check"
+            ;;
+        resume|continue)
+            run_resume "$verbose" "$network_check"
+            ;;
+        check-network|network)
+            check_network_cmd
             ;;
         help|--help|-h)
             show_help

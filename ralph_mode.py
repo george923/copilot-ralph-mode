@@ -752,7 +752,7 @@ All iterations are logged in `.ralph-mode/history.jsonl` for review.
         matches = re.findall(pattern, output_text, re.DOTALL)
 
         for match in matches:
-            if match.strip() == promise:
+            if match.strip() == promise.strip():
                 self.log_iteration(state.get("iteration", 0), "completed", f"Completion promise detected: {promise}")
                 return True
 

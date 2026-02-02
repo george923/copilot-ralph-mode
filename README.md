@@ -1049,7 +1049,9 @@ your-project/
 │   │   ├── post-iteration.sh
 │   │   ├── pre-tool.sh
 │   │   ├── on-completion.sh
-│   │   └── on-network-wait.sh
+│   │   ├── on-network-wait.sh
+│   │   ├── stop.sh           # Loop continuation hook (blocks exit)
+│   │   └── session-start.sh  # Session start status display
 │   ├── instructions/         # Path-specific instructions
 │   │   ├── ralph-mode-python.instructions.md
 │   │   ├── shell-scripts.instructions.md
@@ -1084,7 +1086,7 @@ your-project/
 
 ---
 
-## 🔌 MCP Server Integration
+## 🔗 MCP Server Integration
 
 Ralph Mode supports [MCP (Model Context Protocol)](https://docs.github.com/en/copilot/customizing-copilot/extending-copilot/extending-copilot-coding-agent-with-mcp) servers for extended functionality.
 

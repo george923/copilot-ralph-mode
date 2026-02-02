@@ -388,3 +388,24 @@ Your detailed instructions here...
 ```
 
 Skills are automatically loaded by Copilot when relevant to the task.
+
+---
+
+## Special Hooks
+
+Ralph Mode includes special hooks for session management:
+
+### Stop Hook (`.github/hooks/stop.sh`)
+
+Intercepts session exit attempts to continue the Ralph iteration loop. When the AI tries to exit:
+- Checks if Ralph Mode is active
+- Validates iteration limits
+- Blocks exit and feeds back the same prompt for next iteration
+
+### Session Start Hook (`.github/hooks/session-start.sh`)
+
+Displays Ralph Mode status when a Copilot CLI session starts:
+- Shows current iteration number
+- Displays max iterations limit
+- Shows completion promise
+- Indicates current mode (single/batch)

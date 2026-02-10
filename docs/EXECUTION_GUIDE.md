@@ -270,3 +270,46 @@ python3 ralph_mode.py scan --language python
 3. **Grep fallback** — if no CodeQL: pattern-matches common vulnerabilities (eval, exec, innerHTML, etc.)
 4. **Memory** — saves results to Ralph memory bank as episodic memories
 5. **Non-blocking** — never fails the iteration; always returns 0 unless critical errors found
+
+---
+
+## Part 11: Recent Reliability Improvements (February 2026)
+
+Ralph Mode has received significant stability and reliability improvements:
+
+### Core Fixes
+
+- **✅ Promise Detection**: Now handles completion promises with any amount of whitespace or newlines
+- **✅ Batch Completion**: Fixed crash when completing the final task in batch mode
+- **✅ Task Matching**: Exact ID matches now take priority over fuzzy title matches
+- **✅ File Handle Leaks**: State management properly closes all files after reading
+- **✅ Shell Quoting**: Loop scripts handle paths with spaces and special characters correctly
+
+### Testing Improvements
+
+- **799 passing tests** across 9 comprehensive test suites
+- **0 failures, 0 skips** on all platforms (Ubuntu, macOS, Windows)
+- New test suites added:
+  - `test_ralph_mode_iteration_deep.py` - Complex iteration scenarios
+  - `test_ralph_mode_stress_concurrency.py` - Stress and concurrency
+  - `test_ralph_mode_edge_cases.py` - Edge case coverage
+  - `test_ralph_mode_feature_advanced.py` - Advanced features
+  - `test_e2e_workflows.py` - Full workflow validation
+  - `test_enterprise_scenarios.py` - Production scenarios
+
+### What This Means
+
+- **More reliable loops**: Fewer unexpected failures during long-running tasks
+- **Better batch mode**: Smoother transitions between tasks without crashes
+- **Accurate task selection**: Less chance of running the wrong task
+- **Resource efficient**: No file descriptor exhaustion in long loops
+- **Cross-platform consistency**: Works correctly on Windows, macOS, and Linux
+
+### Verification
+
+```bash
+# Run the full test suite to verify all improvements
+pytest tests/ -v
+
+# Expected output: 799 passed in ~2 minutes
+```

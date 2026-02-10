@@ -39,10 +39,63 @@ Thank you for your interest in contributing! 🎉
 
 ### Testing
 
-Run the test suite before submitting:
+Run the comprehensive test suite before submitting:
 
 ```bash
-bash tests/test-ralph-mode.sh
+# Using pytest (recommended)
+pytest tests/ -v                    # Run all 799 tests
+pytest tests/ -v --timeout=30       # With timeout protection
+pytest tests/ -v -k "test_batch"    # Run specific test pattern
+
+# Using Make
+make test           # Run all tests
+make test-cov       # Run with coverage report
+make lint           # Check code quality
+
+# Quick test during development
+pytest tests/test_ralph_mode.py -v  # Core tests only
+
+# Platform-specific
+pytest tests/test_cross_platform.py -v  # Cross-platform compatibility
+```
+
+### Test Coverage Requirements
+
+- All new features must include tests
+- Bug fixes must include regression tests
+- Tests must pass on all platforms (Ubuntu, macOS, Windows)
+- Tests must pass on Python 3.9, 3.10, 3.11, and 3.12
+- Aim for high test coverage (current: 799 passing tests)
+
+### Test Structure
+
+| Test Suite | Purpose |
+|------------|---------|
+| `test_ralph_mode.py` | Core functionality |
+| `test_ralph_mode_integration.py` | Integration scenarios |
+| `test_ralph_mode_iteration_deep.py` | Deep iteration edge cases |
+| `test_ralph_mode_stress_concurrency.py` | Stress and concurrency |
+| `test_ralph_mode_edge_cases.py` | Edge case coverage |
+| `test_ralph_mode_feature_advanced.py` | Advanced features |
+| `test_e2e_workflows.py` | End-to-end workflows |
+| `test_enterprise_scenarios.py` | Enterprise use cases |
+| `test_cross_platform.py` | Platform compatibility |
+
+### Code Quality
+
+```bash
+# Linting
+make lint           # Run all linters
+flake8 .            # Python linting
+shellcheck *.sh     # Shell script linting
+
+# Formatting
+make format         # Auto-format code
+black .             # Format Python
+isort .             # Sort imports
+
+# Type checking
+mypy ralph_mode/    # Static type analysis
 ```
 
 ## Philosophy

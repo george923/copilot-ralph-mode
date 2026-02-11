@@ -647,69 +647,46 @@ run_verification_review() {
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
     log_line "INFO" "verification_review_start iteration=$iteration"
 
-    # Gather evidence for the critic
-    local task_prompt=$(get_prompt)
-    local git_diff=$(git diff HEAD~1 2>/dev/null | head -300 || echo "<no diff>")
-    local git_status=$(git status --short 2>/dev/null | head -50 || echo "<clean>")
-    local last_output=$(tail -100 "$output_file" 2>/dev/null || echo "<no output>")
-    local files_changed=$(git diff --name-only HEAD~1 2>/dev/null | head -30 || echo "<none>")
+    # Gather evidence for the critic (truncate to avoid arg list too long)
+    local task_prompt=$(get_prompt | head -100)
+    local git_diff=$(git diff HEAD~1 2>/dev/null | head -150 || echo "<no diff>")
+    local git_status=$(git status --short 2>/dev/null | head -30 || echo "<clean>")
+    local last_output=$(tail -50 "$output_file" 2>/dev/null || echo "<no output>")
+    local files_changed=$(git diff --name-only HEAD~1 2>/dev/null | head -20 || echo "<none>")
 
-    # Build the review prompt
-    local review_context="# Critical Review — Iteration $iteration
+    # Build the review prompt and write to file to avoid "Argument list too long"
+    local review_prompt_file="${RALPH_DIR}/review-prompt.txt"
+    cat > "$review_prompt_file" <<REVIEW_EOF
+# Critical Review — Iteration $iteration
 
-You are a **CODE REVIEWER / CRITIC**. Your job is to verify whether the task below has GENUINELY been completed.
+You are a **CODE REVIEWER / CRITIC**. Verify whether the task has GENUINELY been completed.
 
-## Original Task
+## Original Task (summary)
 $task_prompt
 
 ## Files Changed
-\`\`\`
 $files_changed
-\`\`\`
-
-## Changes Made (git diff, first 300 lines)
-\`\`\`
-$git_diff
-\`\`\`
 
 ## Current File Status
-\`\`\`
 $git_status
-\`\`\`
 
-## Doer's Last Output (tail)
-\`\`\`
-$last_output
-\`\`\`
+## Changes Made (git diff, truncated)
+$git_diff
 
 ## Your Review Instructions
-
-1. **Verify EACH acceptance criterion** from the task against the ACTUAL code changes
-2. **Check files actually exist** — run \`ls\` or \`cat\` to confirm they were created
-3. **Look for placeholders** — TODO comments, empty functions, skeleton code = REJECT
-4. **Check imports and syntax** — would this code actually compile/run?
-5. **Assess completeness** — does this fully implement the task, not just scaffold it?
-6. **Check quality** — is this production-grade or just minimal boilerplate?
+1. **Verify acceptance criteria** by running commands to check files exist and have correct content
+2. **Look for placeholders** — TODO comments, empty functions = REJECT
+3. **Check syntax** — would this code actually compile/run?
+4. **Assess completeness** — is the task fully done, not just scaffolded?
 
 ## Your Verdict
+If complete with real working code: \`<verdict>APPROVED</verdict>\`
+If issues exist: \`<verdict>REJECTED</verdict>\` followed by \`<issues>list</issues>\`
 
-If the task is GENUINELY and FULLY complete with real, working code:
-\`\`\`
-<verdict>APPROVED</verdict>
-\`\`\`
+⚠️ Be STRICT. Only approve when ALL acceptance criteria are met.
+REVIEW_EOF
 
-If there are issues, missing work, or low quality:
-\`\`\`
-<verdict>REJECTED</verdict>
-<issues>
-- Issue 1 description
-- Issue 2 description
-</issues>
-\`\`\`
-
-⚠️ Be STRICT. Only approve when ALL acceptance criteria are met with REAL code.
-Do NOT approve skeleton code, placeholder implementations, or incomplete work.
-"
+    local review_context=$(cat "$review_prompt_file")
 
     # Build model options
     local model_opts=""

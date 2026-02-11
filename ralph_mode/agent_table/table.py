@@ -3,18 +3,21 @@
 This is the primary entry-point class that unifies all sub-modules.
 It preserves full backward-compatibility with the original monolithic
 AgentTable while exposing new capabilities (strategies, consensus,
-trust scoring, hooks, validation).
+trust scoring, hooks, validation, negotiation, interaction tracking,
+message routing, and FSM-based state transitions).
 """
 
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .consensus import ConsensusEngine
 from .context import ContextBuilder
+from .fsm import FiniteStateMachine, build_protocol_fsm
 from .hooks import (
     EVENT_APPROVAL,
+    EVENT_CONSENSUS_REACHED,
     EVENT_CRITIQUE_SUBMITTED,
     EVENT_DEADLOCK_DETECTED,
     EVENT_DECISION,
@@ -30,11 +33,15 @@ from .hooks import (
     EVENT_TABLE_FINALIZED,
     EVENT_TABLE_INITIALIZED,
     EVENT_TABLE_RESET,
+    EVENT_VOTE_CAST,
     HookManager,
 )
-from .models import AgentMessage, MessageType, Phase
+from .interaction import InteractionGraph
+from .models import AgentMessage, InteractionType, MessageType, Phase
+from .negotiation import NegotiationManager, NegotiationStatus
 from .protocol import ProtocolEngine
 from .roles import ROLE_ARBITER, ROLE_CRITIC, ROLE_DOER
+from .router import MessageRouter
 from .scoring import TrustScoring
 from .state import TABLE_STATE_FILE, TableState
 from .strategies import DefaultStrategy, DeliberationStrategy, get_strategy
@@ -58,6 +65,24 @@ class AgentTable:
                 implementation.md – Doer's implementation notes
                 review.md        – Critic's review of implementation
                 approval.md      – Arbiter's final approval
+
+    Interaction model:
+
+    - **Threading**: Every message gets a ``message_id``. Replies link
+      via ``reply_to`` and ``thread_id`` to form conversation chains.
+    - **Negotiation**: Multi-turn dialogues are tracked in
+      ``NegotiationManager`` — counter-proposals, clarifications,
+      objections, and acknowledgments are all first-class.
+    - **Routing**: ``MessageRouter`` determines the correct recipient
+      based on phase, strategy, and message type.
+    - **FSM**: Protocol phase transitions use a real finite state
+      machine with guards and side-effects.
+    - **Strategy**: Pluggable ``DeliberationStrategy`` controls when
+      to escalate, auto-approve, or require consensus.
+    - **Consensus**: ``ConsensusEngine`` with trust-weighted voting.
+    - **Trust**: ``TrustScoring`` tracks agent reliability and feeds
+      weights into consensus decisions.
+    - **Validation**: Messages are validated before recording.
     """
 
     def __init__(self, ralph_dir: Optional[Path] = None) -> None:
@@ -65,29 +90,49 @@ class AgentTable:
             ralph_dir = Path.cwd() / ".ralph-mode"
         self.ralph_dir = Path(ralph_dir)
 
-        # Sub-modules
+        # --- Core persistence ---
         self._state_mgr = TableState(self.ralph_dir)
         self._transcript = TranscriptStore(self._state_mgr.table_dir)
+
+        # --- Protocol logic ---
         self._protocol = ProtocolEngine()
-        self._hooks = HookManager()
+        self._fsm = build_protocol_fsm()
+
+        # --- Interaction tracking ---
+        self._interaction = InteractionGraph()
+        self._negotiation = NegotiationManager()
+        self._router = MessageRouter()
+
+        # --- Quality & trust ---
         self._validator = MessageValidator()
         self._state_validator = StateValidator()
         self._scoring = TrustScoring(self._state_mgr.table_dir)
         self._consensus = ConsensusEngine()
-        self._strategy: DeliberationStrategy = DefaultStrategy()
 
-        # Context builder (wired to our getters)
+        # --- Strategy & hooks ---
+        self._strategy: DeliberationStrategy = DefaultStrategy()
+        self._hooks = HookManager()
+
+        # --- Context builder (wired to our getters) ---
         self._context = ContextBuilder(
             get_state=self.get_state,
             get_last_message=self.get_last_message,
             get_messages=self.get_messages,
+            get_trust_weight=lambda agent: self._scoring.get_weight(agent),
+            get_active_negotiations=lambda: [n.to_dict() for n in self._negotiation.get_active()],
+            get_active_threads=lambda: self._interaction.get_active_threads(),
+            get_relationship_matrix=lambda: self._interaction.get_relationship_matrix(),
         )
 
-        # Convenience aliases matching old monolith attribute names
+        # --- Convenience aliases ---
         self.table_dir = self._state_mgr.table_dir
         self.rounds_dir = self._state_mgr.rounds_dir
         self.transcript_file = self._transcript.filepath
         self.state_file = self._state_mgr.state_file
+
+        # Wire negotiation callbacks
+        self._negotiation.on_deadlock(self._on_negotiation_deadlock)
+        self._negotiation.on_escalate(self._on_negotiation_escalate)
 
     # ------------------------------------------------------------------
     # Sub-module Access
@@ -107,6 +152,26 @@ class AgentTable:
     def trust(self) -> TrustScoring:
         """Access the trust scoring system."""
         return self._scoring
+
+    @property
+    def interaction(self) -> InteractionGraph:
+        """Access the interaction graph for thread and relationship tracking."""
+        return self._interaction
+
+    @property
+    def negotiation(self) -> NegotiationManager:
+        """Access the negotiation manager for multi-turn dialogues."""
+        return self._negotiation
+
+    @property
+    def router(self) -> MessageRouter:
+        """Access the message router."""
+        return self._router
+
+    @property
+    def fsm(self) -> FiniteStateMachine:
+        """Access the protocol finite state machine."""
+        return self._fsm
 
     @property
     def strategy(self) -> DeliberationStrategy:
@@ -211,11 +276,18 @@ class AgentTable:
     def send_message(self, message: AgentMessage) -> AgentMessage:
         """Record a message in the transcript and round directory.
 
+        Validates the message, registers it in the interaction graph,
+        processes it through the negotiation manager, and routes it
+        if the recipient isn't explicitly set.
+
         Args:
             message: The AgentMessage to record.
 
         Returns:
             The same message (with timestamp filled in).
+
+        Raises:
+            ValueError: If the table is not active or validation fails.
         """
         state = self.get_state()
         if not state or not state.get("active"):
@@ -225,12 +297,29 @@ class AgentTable:
         if message.round_number == 0:
             message.round_number = state["current_round"]
 
-        # Append to transcript
+        # --- Validation (non-strict: warnings don't block) ---
+        validation = self._validator.validate_message(message, state)
+        if not validation.valid:
+            raise ValueError(f"Message validation failed: {'; '.join(validation.errors)}")
+
+        # --- Routing: fill in recipient if empty ---
+        if not message.recipient:
+            resolved = self._router.resolve_recipient(message, state)
+            if resolved:
+                message.recipient = resolved
+
+        # --- Persist ---
         self._transcript.append(message)
 
         # Write per-round markdown file
         round_dir = self._round_dir(message.round_number)
         self._transcript.write_round_file(message, round_dir)
+
+        # --- Interaction graph ---
+        self._interaction.register_message(message)
+
+        # --- Negotiation tracking ---
+        self._negotiation.process_response(message)
 
         # Update state counters
         state["total_messages"] = state.get("total_messages", 0) + 1
@@ -319,7 +408,11 @@ class AgentTable:
     # ------------------------------------------------------------------
 
     def submit_plan(self, plan_content: str) -> AgentMessage:
-        """Doer submits an implementation plan for Critic review."""
+        """Doer submits an implementation plan for Critic review.
+
+        Also starts a negotiation thread — the Critic's critique will
+        be processed as the first response in the negotiation.
+        """
         state = self.get_state()
         if not state or not state.get("active"):
             raise ValueError("Agent Table is not active.")
@@ -331,13 +424,21 @@ class AgentTable:
             content=plan_content,
             round_number=state["current_round"],
             phase=Phase.PLAN.value,
+            interaction_type=InteractionType.REQUEST.value,
         )
         self.send_message(msg)
+
+        # Start a negotiation for this plan
+        self._negotiation.start_negotiation(msg, subject=f"Round {state['current_round']} plan")
+
         self._hooks.emit(EVENT_PLAN_SUBMITTED, message=msg, state=state)
         return msg
 
     def submit_critique(self, critique_content: str, *, approved: bool = False) -> AgentMessage:
         """Critic submits a critique of the Doer's plan or implementation.
+
+        Uses the strategy to decide whether to escalate when not approved,
+        instead of relying solely on the ``auto_escalate`` flag.
 
         Args:
             critique_content: The critique text.
@@ -347,6 +448,11 @@ class AgentTable:
         if not state or not state.get("active"):
             raise ValueError("Agent Table is not active.")
 
+        # Link to the last plan/implementation as a reply
+        last_doer = self.get_last_message(sender=ROLE_DOER)
+        reply_to = last_doer.message_id if last_doer else None
+        thread_id = last_doer.thread_id if last_doer else None
+
         msg = AgentMessage(
             sender=ROLE_CRITIC,
             recipient=ROLE_DOER,
@@ -355,18 +461,34 @@ class AgentTable:
             round_number=state["current_round"],
             phase=state["current_phase"],
             metadata={"approved": approved},
+            reply_to=reply_to,
+            thread_id=thread_id,
+            interaction_type=(InteractionType.CONCESSION.value if approved else InteractionType.CHALLENGE.value),
         )
         self.send_message(msg)
+
+        # Record trust event
+        self._scoring.record_event(
+            ROLE_CRITIC,
+            "critique",
+            aligned_with_outcome=approved,
+            details=critique_content[:200],
+        )
+
         self._hooks.emit(EVENT_CRITIQUE_SUBMITTED, message=msg, state=state)
 
-        # Auto-escalate if not approved and auto_escalate is on
-        if not approved and state.get("auto_escalate"):
-            self.escalate(reason="Critic did not approve. Escalating to Arbiter for decision.")
+        # Strategy-based escalation instead of hardcoded auto_escalate
+        if self._strategy.should_escalate(state, approved):
+            reason = self._strategy.get_escalation_reason(state, approved)
+            self.escalate(reason=reason)
 
         return msg
 
     def submit_implementation(self, implementation_notes: str) -> AgentMessage:
-        """Doer submits implementation notes after making changes."""
+        """Doer submits implementation notes after making changes.
+
+        Starts a new negotiation thread for the implementation review cycle.
+        """
         state = self.get_state()
         if not state or not state.get("active"):
             raise ValueError("Agent Table is not active.")
@@ -378,8 +500,12 @@ class AgentTable:
             content=implementation_notes,
             round_number=state["current_round"],
             phase=Phase.IMPLEMENT.value,
+            interaction_type=InteractionType.REQUEST.value,
         )
         self.send_message(msg)
+
+        # Start a negotiation for the implementation review
+        self._negotiation.start_negotiation(msg, subject=f"Round {state['current_round']} implementation review")
 
         # Advance to implement phase
         state = self.get_state()
@@ -390,10 +516,19 @@ class AgentTable:
         return msg
 
     def submit_review(self, review_content: str, *, approved: bool = False) -> AgentMessage:
-        """Critic submits a review of the Doer's implementation."""
+        """Critic submits a review of the Doer's implementation.
+
+        Uses the strategy to decide whether to escalate, mirroring
+        the logic in ``submit_critique``.
+        """
         state = self.get_state()
         if not state or not state.get("active"):
             raise ValueError("Agent Table is not active.")
+
+        # Link as a reply to the last implementation
+        last_impl = self.get_last_message(sender=ROLE_DOER, msg_type=MessageType.IMPLEMENTATION.value)
+        reply_to = last_impl.message_id if last_impl else None
+        thread_id = last_impl.thread_id if last_impl else None
 
         msg = AgentMessage(
             sender=ROLE_CRITIC,
@@ -403,12 +538,26 @@ class AgentTable:
             round_number=state["current_round"],
             phase=Phase.IMPLEMENT.value,
             metadata={"approved": approved},
+            reply_to=reply_to,
+            thread_id=thread_id,
+            interaction_type=(InteractionType.CONCESSION.value if approved else InteractionType.CHALLENGE.value),
         )
         self.send_message(msg)
+
+        # Record trust event
+        self._scoring.record_event(
+            ROLE_CRITIC,
+            "review",
+            aligned_with_outcome=approved,
+            details=review_content[:200],
+        )
+
         self._hooks.emit(EVENT_REVIEW_SUBMITTED, message=msg, state=state)
 
-        if not approved and state.get("auto_escalate"):
-            self.escalate(reason="Critic did not approve implementation. Escalating to Arbiter.")
+        # Strategy-based escalation
+        if self._strategy.should_escalate(state, approved):
+            reason = self._strategy.get_escalation_reason(state, approved)
+            self.escalate(reason=reason)
 
         return msg
 
@@ -549,6 +698,315 @@ class AgentTable:
         return msg
 
     # ------------------------------------------------------------------
+    # Interactive Response Methods
+    # ------------------------------------------------------------------
+
+    def submit_response(
+        self,
+        sender: str,
+        content: str,
+        *,
+        in_reply_to: Optional[AgentMessage] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AgentMessage:
+        """Submit a generic response within the conversation.
+
+        Use this when an agent responds to a message in a way that
+        doesn't neatly fit into plan/critique/review/decision buckets.
+
+        Args:
+            sender: The agent sending the response.
+            content: The response text.
+            in_reply_to: The message being replied to (for threading).
+            metadata: Extra key-value data.
+
+        Returns:
+            The recorded AgentMessage.
+        """
+        state = self.get_state()
+        if not state or not state.get("active"):
+            raise ValueError("Agent Table is not active.")
+
+        if in_reply_to:
+            msg = in_reply_to.create_reply(
+                sender=sender,
+                msg_type=MessageType.RESPONSE.value,
+                content=content,
+                metadata=metadata,
+                interaction_type=InteractionType.RESPONSE.value,
+            )
+        else:
+            msg = AgentMessage(
+                sender=sender,
+                recipient=self._infer_recipient(sender),
+                msg_type=MessageType.RESPONSE.value,
+                content=content,
+                round_number=state["current_round"],
+                phase=state["current_phase"],
+                metadata=metadata,
+                interaction_type=InteractionType.RESPONSE.value,
+            )
+
+        return self.send_message(msg)
+
+    def request_clarification(
+        self,
+        sender: str,
+        question: str,
+        *,
+        in_reply_to: Optional[AgentMessage] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AgentMessage:
+        """Request clarification from another agent.
+
+        Creates a CLARIFICATION message in the thread, flagging
+        the negotiation as needing more info before proceeding.
+
+        Args:
+            sender: Who is asking for clarification.
+            question: The clarification question.
+            in_reply_to: The message that prompted the question.
+            metadata: Extra data.
+
+        Returns:
+            The recorded AgentMessage.
+        """
+        state = self.get_state()
+        if not state or not state.get("active"):
+            raise ValueError("Agent Table is not active.")
+
+        if in_reply_to:
+            msg = in_reply_to.create_reply(
+                sender=sender,
+                msg_type=MessageType.CLARIFICATION.value,
+                content=question,
+                metadata=metadata,
+                interaction_type=InteractionType.REQUEST.value,
+            )
+        else:
+            msg = AgentMessage(
+                sender=sender,
+                recipient=self._infer_recipient(sender),
+                msg_type=MessageType.CLARIFICATION.value,
+                content=question,
+                round_number=state["current_round"],
+                phase=state["current_phase"],
+                metadata=metadata,
+                interaction_type=InteractionType.REQUEST.value,
+            )
+
+        return self.send_message(msg)
+
+    def submit_clarification_response(
+        self,
+        sender: str,
+        answer: str,
+        *,
+        in_reply_to: Optional[AgentMessage] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AgentMessage:
+        """Respond to a clarification request.
+
+        Args:
+            sender: Who is providing the clarification.
+            answer: The clarification answer.
+            in_reply_to: The clarification question being answered.
+            metadata: Extra data.
+
+        Returns:
+            The recorded AgentMessage.
+        """
+        state = self.get_state()
+        if not state or not state.get("active"):
+            raise ValueError("Agent Table is not active.")
+
+        if in_reply_to:
+            msg = in_reply_to.create_reply(
+                sender=sender,
+                msg_type=MessageType.CLARIFICATION_RESPONSE.value,
+                content=answer,
+                metadata=metadata,
+                interaction_type=InteractionType.RESPONSE.value,
+            )
+        else:
+            msg = AgentMessage(
+                sender=sender,
+                recipient=self._infer_recipient(sender),
+                msg_type=MessageType.CLARIFICATION_RESPONSE.value,
+                content=answer,
+                round_number=state["current_round"],
+                phase=state["current_phase"],
+                metadata=metadata,
+                interaction_type=InteractionType.RESPONSE.value,
+            )
+
+        return self.send_message(msg)
+
+    def submit_counter_proposal(
+        self,
+        sender: str,
+        proposal: str,
+        *,
+        in_reply_to: Optional[AgentMessage] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AgentMessage:
+        """Submit a counter-proposal as an alternative approach.
+
+        Starts a new negotiation round and records the counter as
+        an alternative to what was previously proposed or critiqued.
+
+        Args:
+            sender: Who is counter-proposing.
+            proposal: The counter-proposal text.
+            in_reply_to: The message being countered.
+            metadata: Extra data.
+
+        Returns:
+            The recorded AgentMessage.
+        """
+        state = self.get_state()
+        if not state or not state.get("active"):
+            raise ValueError("Agent Table is not active.")
+
+        if in_reply_to:
+            msg = in_reply_to.create_reply(
+                sender=sender,
+                msg_type=MessageType.COUNTER_PROPOSAL.value,
+                content=proposal,
+                metadata=metadata,
+                interaction_type=InteractionType.NEGOTIATION.value,
+            )
+        else:
+            msg = AgentMessage(
+                sender=sender,
+                recipient=self._infer_recipient(sender),
+                msg_type=MessageType.COUNTER_PROPOSAL.value,
+                content=proposal,
+                round_number=state["current_round"],
+                phase=state["current_phase"],
+                metadata=metadata,
+                interaction_type=InteractionType.NEGOTIATION.value,
+            )
+
+        return self.send_message(msg)
+
+    def submit_objection(
+        self,
+        sender: str,
+        reason: str,
+        *,
+        in_reply_to: Optional[AgentMessage] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AgentMessage:
+        """Submit a formal objection to the current approach.
+
+        Objections trigger escalation to the Arbiter via the
+        negotiation manager's escalation callback.
+
+        Args:
+            sender: Who is objecting.
+            reason: The reason for the objection.
+            in_reply_to: The message being objected to.
+            metadata: Extra data.
+
+        Returns:
+            The recorded AgentMessage.
+        """
+        state = self.get_state()
+        if not state or not state.get("active"):
+            raise ValueError("Agent Table is not active.")
+
+        if in_reply_to:
+            msg = in_reply_to.create_reply(
+                sender=sender,
+                msg_type=MessageType.OBJECTION.value,
+                content=reason,
+                metadata=metadata,
+                interaction_type=InteractionType.CHALLENGE.value,
+            )
+        else:
+            msg = AgentMessage(
+                sender=sender,
+                recipient=self._infer_recipient(sender),
+                msg_type=MessageType.OBJECTION.value,
+                content=reason,
+                round_number=state["current_round"],
+                phase=state["current_phase"],
+                metadata=metadata,
+                interaction_type=InteractionType.CHALLENGE.value,
+            )
+
+        return self.send_message(msg)
+
+    def submit_acknowledgment(
+        self,
+        sender: str,
+        notes: str = "",
+        *,
+        in_reply_to: Optional[AgentMessage] = None,
+    ) -> AgentMessage:
+        """Acknowledge a message — signal agreement without full approval.
+
+        Args:
+            sender: Who is acknowledging.
+            notes: Optional acknowledgment notes.
+            in_reply_to: The message being acknowledged.
+
+        Returns:
+            The recorded AgentMessage.
+        """
+        state = self.get_state()
+        if not state or not state.get("active"):
+            raise ValueError("Agent Table is not active.")
+
+        if in_reply_to:
+            msg = in_reply_to.create_reply(
+                sender=sender,
+                msg_type=MessageType.ACKNOWLEDGMENT.value,
+                content=notes or "Acknowledged.",
+                interaction_type=InteractionType.CONCESSION.value,
+            )
+        else:
+            msg = AgentMessage(
+                sender=sender,
+                recipient=self._infer_recipient(sender),
+                msg_type=MessageType.ACKNOWLEDGMENT.value,
+                content=notes or "Acknowledged.",
+                round_number=state["current_round"],
+                phase=state["current_phase"],
+                interaction_type=InteractionType.CONCESSION.value,
+            )
+
+        return self.send_message(msg)
+
+    # ------------------------------------------------------------------
+    # Internal Helpers
+    # ------------------------------------------------------------------
+
+    def _infer_recipient(self, sender: str) -> str:
+        """Infer the default recipient based on the sender's role."""
+        if sender == ROLE_DOER:
+            return ROLE_CRITIC
+        elif sender == ROLE_CRITIC:
+            return ROLE_DOER
+        else:
+            return ROLE_DOER  # Arbiter defaults to Doer
+
+    def _on_negotiation_deadlock(self, neg) -> None:
+        """Called by NegotiationManager when a negotiation deadlocks."""
+        state = self.get_state()
+        if state and state.get("active"):
+            self._hooks.emit(EVENT_DEADLOCK_DETECTED, state=state, negotiation=neg)
+            # Auto-escalate deadlocked negotiations
+            self.escalate(reason=f"Negotiation deadlocked after {neg.round_count} rounds: {neg.subject}")
+
+    def _on_negotiation_escalate(self, neg) -> None:
+        """Called by NegotiationManager when an objection triggers escalation."""
+        state = self.get_state()
+        if state and state.get("active"):
+            self.escalate(reason=f"Objection raised in negotiation: {neg.subject}")
+
+    # ------------------------------------------------------------------
     # Finalization
     # ------------------------------------------------------------------
 
@@ -641,6 +1099,9 @@ class AgentTable:
             return None
 
         msg_by_sender = self._transcript.count_by_sender()
+        neg_summary = self._negotiation.summary()
+        active_threads = self._interaction.get_active_threads()
+        disputed_threads = self._interaction.get_disputed_threads()
 
         return {
             "active": state.get("active", False),
@@ -655,6 +1116,14 @@ class AgentTable:
             "rounds_summary": state.get("rounds_summary", []),
             "started_at": state.get("started_at"),
             "completed_at": state.get("completed_at"),
+            "strategy": self._strategy.name,
+            "negotiations": neg_summary,
+            "threads": {
+                "total": self._interaction.thread_count,
+                "active": len(active_threads),
+                "disputed": len(disputed_threads),
+            },
+            "fsm_state": self._fsm.current_state,
         }
 
     def get_transcript_text(self) -> str:

@@ -920,8 +920,9 @@ class TestEdgeCases:
         assert len(msg.content) == 10000
 
     def test_empty_content(self, table_with_round):
-        msg = table_with_round.submit_plan("")
-        assert msg.content == ""
+        """Empty content is rejected by validation."""
+        with pytest.raises(ValueError, match="validation failed"):
+            table_with_round.submit_plan("")
 
     def test_special_characters(self, table_with_round):
         special = 'Plan with "quotes", <tags>, & ampersands\nand newlines\ttabs'

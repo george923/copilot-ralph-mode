@@ -6,18 +6,22 @@ Implements a pluggable multi-agent collaboration pattern:
   Agent 3 (Arbiter) – Makes final decisions, resolves disagreements
 
 Modular architecture:
-  models      – Data models (AgentMessage, Phase, MessageType, enums)
-  roles       – Agent role definitions and registry
-  state       – Table state persistence and round management
-  transcript  – JSONL-based message log with queries
-  protocol    – Phase transition logic and deadlock detection
-  strategies  – Pluggable deliberation strategies
-  consensus   – Voting, quorum, weighted scoring
-  scoring     – Per-agent trust tracking
-  context     – Per-agent markdown context builders
-  hooks       – Event-driven callbacks
-  validators  – Message and state validation
-  table       – Main orchestrator (AgentTable)
+  models        – Data models (AgentMessage, Phase, MessageType, enums)
+  roles         – Agent role definitions and registry
+  state         – Table state persistence and round management
+  transcript    – JSONL-based message log with queries
+  protocol      – Phase transition logic and deadlock detection
+  strategies    – Pluggable deliberation strategies
+  consensus     – Voting, quorum, weighted scoring
+  scoring       – Per-agent trust tracking
+  context       – Per-agent markdown context builders
+  hooks         – Event-driven callbacks
+  validators    – Message and state validation
+  interaction   – Conversation threads and relationship graph
+  negotiation   – Multi-turn dialogue and counter-proposal management
+  router        – Conditional message routing
+  fsm           – Finite state machine for protocol transitions
+  table         – Main orchestrator (AgentTable)
 """
 
 # Consensus
@@ -25,6 +29,9 @@ from .consensus import ConsensusEngine, Vote
 
 # Context
 from .context import ContextBuilder
+
+# FSM
+from .fsm import FiniteStateMachine, FSMError, Transition, TransitionRecord, build_protocol_fsm
 
 # Hooks
 from .hooks import (
@@ -49,14 +56,23 @@ from .hooks import (
     HookManager,
 )
 
+# Interaction
+from .interaction import ConversationThread, InteractionGraph
+
 # Core models
-from .models import AgentMessage, Confidence, MessageType, Phase, Severity
+from .models import AgentMessage, Confidence, InteractionType, MessageType, Phase, Severity
+
+# Negotiation
+from .negotiation import Negotiation, NegotiationManager, NegotiationRound, NegotiationStatus
 
 # Protocol
 from .protocol import ProtocolEngine
 
 # Roles
 from .roles import ALL_ROLES, ROLE_ARBITER, ROLE_CRITIC, ROLE_DOER, AgentRole, RoleRegistry
+
+# Router
+from .router import MessageRouter, RoutingRule
 
 # Trust scoring
 from .scoring import AgentTrustRecord, TrustScoring
@@ -91,6 +107,7 @@ __all__ = [
     "MessageType",
     "Severity",
     "Confidence",
+    "InteractionType",
     # Roles
     "ROLE_DOER",
     "ROLE_CRITIC",
@@ -144,4 +161,21 @@ __all__ = [
     "ValidationResult",
     # Transcript
     "TranscriptStore",
+    # Interaction (NEW)
+    "InteractionGraph",
+    "ConversationThread",
+    # Negotiation (NEW)
+    "NegotiationManager",
+    "Negotiation",
+    "NegotiationStatus",
+    "NegotiationRound",
+    # Router (NEW)
+    "MessageRouter",
+    "RoutingRule",
+    # FSM (NEW)
+    "FiniteStateMachine",
+    "build_protocol_fsm",
+    "FSMError",
+    "Transition",
+    "TransitionRecord",
 ]

@@ -12,7 +12,7 @@
 - ساختار مسیرها
 - راه‌اندازی Dev Container
 - تنظیمات Mac (SSH mount + Sleep)
-- آماده‌سازی پروژه Davat
+- آماده‌سازی پروژه داخل workspace
 - آماده‌سازی Ralph و تسک‌ها
 - نصب و احراز هویت Copilot CLI (قطعی)
 - اجرای Ralph Loop
@@ -23,7 +23,7 @@
 ---
 
 ## هدف
-- اجرای Ralph به صورت batch روی تسک‌های پروژه Davat در Dev Container
+- اجرای Ralph به صورت batch روی تسک‌های پروژه در Dev Container
 - اطمینان از اجرای پایدار در macOS
 - قابلیت تکرار کامل توسط یک AI دیگر
 
@@ -39,11 +39,11 @@
 
 ## ساختار مسیرها (استاندارد)
 - ریشه Ralph: `/workspace`
-- پروژه Davat در کانتینر: `/workspace/projects/دوات`
+- پروژه داخل کانتینر: `/workspace/projects/<PROJECT_DIR>`
 
 در میزبان macOS:
 - Ralph repo: `/Users/<USER>/projects/ralph-latest`
-- Davat repo: `/Users/<USER>/projects/davaat vs code`
+- پروژه روی میزبان: `/Users/<USER>/projects/<YOUR_PROJECT>`
 
 ---
 
@@ -54,10 +54,10 @@
 git clone https://github.com/sepehrbayat/copilot-ralph-mode.git /Users/<USER>/projects/ralph-latest
 ```
 
-### 2) کپی Davat داخل ساختار Ralph
+### 2) کپی پروژه داخل ساختار Ralph
 ```bash
-mkdir -p "/Users/<USER>/projects/ralph-latest/projects/دوات"
-cp -R "/Users/<USER>/projects/davaat vs code/." "/Users/<USER>/projects/ralph-latest/projects/دوات/"
+mkdir -p "/Users/<USER>/projects/ralph-latest/projects/<PROJECT_DIR>"
+cp -R "/Users/<USER>/projects/<YOUR_PROJECT>/.\" \"/Users/<USER>/projects/ralph-latest/projects/<PROJECT_DIR>/"
 ```
 
 ### 3) تنظیم devcontainer.json
@@ -65,7 +65,7 @@ cp -R "/Users/<USER>/projects/davaat vs code/." "/Users/<USER>/projects/ralph-la
 - `.devcontainer/devcontainer.json`
 
 تنظیمات کلیدی:
-- `workspaceFolder` = `/workspace/projects/دوات`
+- `workspaceFolder` = `/workspace/projects/<PROJECT_DIR>`
 - `postCreateCommand` و `postStartCommand` طوری اجرا شوند که اسکریپت‌ها از `/workspace/.devcontainer/...` اجرا شوند.
 
 ### 4) فیکس خطای mount SSH (macOS)
@@ -73,7 +73,7 @@ cp -R "/Users/<USER>/projects/davaat vs code/." "/Users/<USER>/projects/ralph-la
 - `.devcontainer/docker-compose.yml`
 
 اگر `${USERPROFILE}` وجود دارد، آن را با `${HOME}` جایگزین کنید:
-```
+```yaml
 ${HOME}/.ssh:/home/vscode/.ssh:ro
 ```
 
@@ -112,10 +112,10 @@ caffeinate -t 28800
 
 ---
 
-## آماده‌سازی پروژه Davat
+## آماده‌سازی پروژه داخل کانتینر
 در کانتینر باید مسیر پروژه این باشد:
-```
-/workspace/projects/دوات
+```text
+/workspace/projects/<PROJECT_DIR>
 ```
 
 ---
@@ -124,7 +124,7 @@ caffeinate -t 28800
 
 ### 1) ساخت تسک‌ها
 - همه تسک‌ها در: `tasks/*.md`
-- گروه: `tasks/_groups/davat-features-v1.json`
+- گروه: `tasks/_groups/<PROJECT_GROUP>.json`
 - لیست تسک‌ها: `tasks/tasks.json`
 
 ### 2) تنظیم مدل پیش‌فرض
@@ -132,13 +132,13 @@ caffeinate -t 28800
 - `production/tools/copilot-ralph-mode/ralph_mode/constants.py`
 
 مقدار:
-```
+```python
 DEFAULT_MODEL = "claude-sonnet-4.5"
 ```
 
 ### 3) فعال کردن Agent Table (اگر پشتیبانی می‌شود)
 ```bash
-python -m ralph_mode table init "Davaat Features v1"
+python -m ralph_mode table init "<PROJECT_GROUP_TITLE>"
 python -m ralph_mode table status
 ```
 
@@ -189,7 +189,7 @@ copilot -p "Say hello"
 ```bash
 python -m ralph_mode disable
 python -m ralph_mode run \
-  --group davat-features-v1 \
+  --group <PROJECT_GROUP> \
   --model "claude-sonnet-4.5" \
   --max-iterations 5 \
   --completion-promise "TASK_DONE"
@@ -212,8 +212,8 @@ while true; do
   python - <<'PY'
 from pathlib import Path
 import json
-hist=Path("/workspace/projects/دوات/.ralph-mode/history.jsonl")
-state=json.loads(Path("/workspace/projects/دوات/.ralph-mode/state.json").read_text())
+hist=Path("/workspace/projects/<PROJECT_DIR>/.ralph-mode/history.jsonl")
+state=json.loads(Path("/workspace/projects/<PROJECT_DIR>/.ralph-mode/state.json").read_text())
 completed=0
 for line in hist.read_text().splitlines():
     try:
@@ -238,14 +238,14 @@ done
 
 ## عیب‌یابی سریع
 - اگر loop متوقف شد، اول `copilot -p "ping"` را تست کن.
-- اگر Copilot auth نبود، `copilot login` را دوباره انجام بده.
-- اگر تسک‌ها validation رد شدند، `RALPH_SKIP_TASK_VALIDATION=1` ضروری است.
+- در صورت auth نبودن Copilot، `copilot login` را دوباره انجام بده.
+- زمانی که validation تسک‌ها رد شد، `RALPH_SKIP_TASK_VALIDATION=1` ضروری است.
 - اگر performance کند شد، RAM Docker Desktop را حداقل 8GB بگذار.
 
 ---
 
 ## چک‌لیست نهایی
-- [ ] Dev Container سالم و پروژه در `/workspace/projects/دوات`
+- [ ] Dev Container سالم و پروژه در `/workspace/projects/<PROJECT_DIR>`
 - [ ] تسک‌ها و گروه آماده
 - [ ] مدل پیش‌فرض تنظیم شده
 - [ ] Copilot CLI نصب و auth شده

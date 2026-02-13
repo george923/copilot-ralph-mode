@@ -59,6 +59,17 @@ FALLBACK_MODEL="auto"
 # Minimum iterations before accepting completion promise
 MIN_ITERATIONS="${RALPH_MIN_ITERATIONS:-2}"
 
+# Maximum total wait time for network (seconds). 0=unlimited.
+# Prevents Ralph from waiting forever when network is down.
+MAX_NETWORK_WAIT_TOTAL="${RALPH_MAX_NETWORK_WAIT:-1800}"  # 30 minutes default
+
+# Auto-commit after each task completion (prevents data loss)
+AUTO_COMMIT_ON_TASK="${RALPH_AUTO_COMMIT:-true}"
+
+# Compilation check command (language-specific, auto-detected or override)
+# Set to empty string to disable compilation gate
+COMPILE_CHECK_CMD="${RALPH_COMPILE_CHECK_CMD:-}"
+
 # Default process limits
 DEFAULT_NPROC_LIMIT=65535
 DEFAULT_NOFILE_LIMIT=1048576
@@ -257,21 +268,39 @@ check_internet() {
 }
 
 # Wait for internet connection with exponential backoff
+# Respects MAX_NETWORK_WAIT_TOTAL to prevent infinite waits
 wait_for_internet() {
     local wait_time=$NETWORK_RETRY_INITIAL
     local total_waited=0
     local attempt=1
+    local max_wait=${MAX_NETWORK_WAIT_TOTAL:-0}
 
     echo -e "\n${YELLOW}═══════════════════════════════════════════════════════════════${NC}"
     echo -e "${YELLOW}🔌 Network connection lost - waiting for reconnection...${NC}"
+    if [[ "$max_wait" -gt 0 ]]; then
+        echo -e "${YELLOW}   Max wait: ${max_wait}s ($(( max_wait / 60 )) minutes)${NC}"
+    fi
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════${NC}\n"
 
     # Save checkpoint before waiting
     save_checkpoint "network_disconnected"
 
     while ! check_internet; do
+        # ── Timeout guard: don't wait forever ──
+        if [[ "$max_wait" -gt 0 && "$total_waited" -ge "$max_wait" ]]; then
+            echo -e "\n${RED}❌ Network wait timeout exceeded (${total_waited}s >= ${max_wait}s)${NC}"
+            echo -e "${RED}   Skipping current task and moving to next...${NC}"
+            log_line "WARN" "network_wait_timeout total_waited=${total_waited}s max=${max_wait}s"
+            save_checkpoint "network_timeout"
+            return 1  # Signal timeout to caller
+        fi
+
         local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-        echo -e "${MAGENTA}[$timestamp]${NC} Attempt $attempt: Waiting ${wait_time}s for network... (total: ${total_waited}s)"
+        local remaining=""
+        if [[ "$max_wait" -gt 0 ]]; then
+            remaining=" | timeout in $(( max_wait - total_waited ))s"
+        fi
+        echo -e "${MAGENTA}[$timestamp]${NC} Attempt $attempt: Waiting ${wait_time}s for network... (total: ${total_waited}s${remaining})"
 
         sleep "$wait_time"
         total_waited=$((total_waited + wait_time))
@@ -281,6 +310,14 @@ wait_for_internet() {
         wait_time=$((wait_time * NETWORK_RETRY_MULTIPLIER))
         if [[ $wait_time -gt $NETWORK_RETRY_MAX ]]; then
             wait_time=$NETWORK_RETRY_MAX
+        fi
+
+        # Cap wait_time so we don't overshoot the total max
+        if [[ "$max_wait" -gt 0 ]]; then
+            local remaining_time=$(( max_wait - total_waited ))
+            if [[ "$wait_time" -gt "$remaining_time" && "$remaining_time" -gt 0 ]]; then
+                wait_time=$remaining_time
+            fi
         fi
 
         # Run hook if exists
@@ -629,8 +666,201 @@ PY
 }
 
 # ═══════════════════════════════════════════════════════════════
-# Multi-Agent Verification (Doer → Critic → Arbiter)
+# Multi-Agent Verification (Doer → Compile Gate → Critic → Arbiter)
 # ═══════════════════════════════════════════════════════════════
+
+# ── Auto-detect compilation/analysis command for the project ──
+# Returns the command to check for compile errors, or empty if none found.
+detect_compile_check_cmd() {
+    # If user explicitly set it, use that
+    if [[ -n "$COMPILE_CHECK_CMD" ]]; then
+        echo "$COMPILE_CHECK_CMD"
+        return 0
+    fi
+
+    # Auto-detect based on project files
+    if [[ -f "pubspec.yaml" ]]; then
+        # Flutter/Dart project
+        local flutter_bin=$(command -v flutter 2>/dev/null || echo "")
+        if [[ -z "$flutter_bin" && -x "/opt/flutter/bin/flutter" ]]; then
+            flutter_bin="/opt/flutter/bin/flutter"
+        fi
+        if [[ -n "$flutter_bin" ]]; then
+            local dart_bin="${flutter_bin%flutter}dart"
+            if [[ -x "$dart_bin" ]]; then
+                echo "$dart_bin analyze lib/"
+                return 0
+            fi
+        fi
+        local dart_bin=$(command -v dart 2>/dev/null || echo "")
+        if [[ -n "$dart_bin" ]]; then
+            echo "$dart_bin analyze lib/"
+            return 0
+        fi
+    elif [[ -f "tsconfig.json" ]]; then
+        # TypeScript project
+        if command -v npx &>/dev/null; then
+            echo "npx tsc --noEmit"
+            return 0
+        fi
+    elif [[ -f "Cargo.toml" ]]; then
+        # Rust project
+        if command -v cargo &>/dev/null; then
+            echo "cargo check 2>&1"
+            return 0
+        fi
+    elif [[ -f "go.mod" ]]; then
+        # Go project
+        if command -v go &>/dev/null; then
+            echo "go build ./... 2>&1"
+            return 0
+        fi
+    elif [[ -f "setup.py" || -f "pyproject.toml" ]]; then
+        # Python project — use flake8 or pyflakes if available
+        if command -v flake8 &>/dev/null; then
+            echo "flake8 --select=E9,F63,F7,F82 --show-source --statistics ."
+            return 0
+        fi
+    fi
+
+    echo ""
+    return 1
+}
+
+# ── Quality Gate 0: Compilation/Static Analysis Check ──
+# Runs language-specific compilation check BEFORE calling the critic.
+# Returns 0 if clean (or no checker found), 1 if errors detected.
+run_compilation_gate() {
+    local compile_cmd
+    compile_cmd=$(detect_compile_check_cmd)
+
+    if [[ -z "$compile_cmd" ]]; then
+        log_line "DEBUG" "compilation_gate_skip reason=no_checker_found"
+        return 0  # No checker — pass through
+    fi
+
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║     🔨 QUALITY GATE 0: Compilation Check                 ║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
+    log_line "INFO" "compilation_gate_start cmd='$compile_cmd'"
+
+    local compile_output_file="${RALPH_DIR}/compile-output.txt"
+
+    # Run the compile check with a timeout
+    if eval "timeout 120 $compile_cmd" > "$compile_output_file" 2>&1; then
+        echo -e "${GREEN}✅ Compilation check passed — no errors${NC}"
+        log_line "INFO" "compilation_gate_pass"
+        rm -f "$compile_output_file"
+        return 0
+    else
+        local exit_code=$?
+
+        # Count errors (language-specific parsing)
+        local error_count=0
+        if grep -qE "error -|error\[" "$compile_output_file" 2>/dev/null; then
+            # Dart / Rust style
+            error_count=$(grep -cE "error -|error\[" "$compile_output_file" 2>/dev/null || echo "0")
+        elif grep -qE "^error TS|error:" "$compile_output_file" 2>/dev/null; then
+            # TypeScript / generic
+            error_count=$(grep -cE "^error TS|error:" "$compile_output_file" 2>/dev/null || echo "0")
+        elif grep -qE "^E[0-9]|^F[0-9]|SyntaxError" "$compile_output_file" 2>/dev/null; then
+            # Python
+            error_count=$(grep -cE "^E[0-9]|^F[0-9]|SyntaxError" "$compile_output_file" 2>/dev/null || echo "0")
+        else
+            # Fallback: count lines that look like errors
+            error_count=$(wc -l < "$compile_output_file" 2>/dev/null || echo "0")
+        fi
+
+        echo -e "${RED}❌ Compilation gate FAILED — $error_count error(s) detected${NC}"
+        log_line "INFO" "compilation_gate_fail error_count=$error_count"
+
+        # Write errors as review issues so the doer sees them
+        {
+            echo "## 🔨 COMPILATION ERRORS — Fix these before claiming completion!"
+            echo ""
+            echo "The following compile/analysis errors were detected. Fix ALL of them:"
+            echo ""
+            echo '```'
+            # Show up to 60 error lines, not the full output
+            grep -E "error|Error|ERROR" "$compile_output_file" 2>/dev/null | head -60
+            echo '```'
+            echo ""
+            echo "**Total errors: $error_count**"
+            echo ""
+            echo "Run \`$compile_cmd\` to verify your fixes."
+        } > "${RALPH_DIR}/review-issues.txt"
+
+        return 1
+    fi
+}
+
+# ── Auto-commit after task completion ──
+# Commits all staged/unstaged changes with a descriptive message.
+# Prevents data loss and gives the critic accurate diffs.
+auto_commit_task() {
+    local task_id="${1:-unknown}"
+    local iteration="${2:-0}"
+
+    if [[ "$AUTO_COMMIT_ON_TASK" != "true" ]]; then
+        log_line "DEBUG" "auto_commit_skip reason=disabled"
+        return 0
+    fi
+
+    # Check if there are changes to commit
+    if git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null; then
+        log_line "DEBUG" "auto_commit_skip reason=no_changes"
+        return 0
+    fi
+
+    echo -e "${BLUE}📦 Auto-committing task completion...${NC}"
+    log_line "INFO" "auto_commit_start task=$task_id iteration=$iteration"
+
+    # Stage all changes
+    git add -A 2>/dev/null || {
+        log_line "WARN" "auto_commit_add_failed"
+        return 1
+    }
+
+    # Commit with descriptive message
+    local commit_msg="feat(ralph): complete task $task_id [iteration $iteration]
+
+Automated commit by Ralph Mode after task completion.
+Task: $task_id
+Iteration: $iteration
+Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    if git commit -m "$commit_msg" --no-verify 2>/dev/null; then
+        local commit_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "???")
+        echo -e "${GREEN}✅ Committed: $commit_hash — $task_id${NC}"
+        log_line "INFO" "auto_commit_success hash=$commit_hash task=$task_id"
+    else
+        echo -e "${YELLOW}⚠️ Auto-commit failed (maybe no changes?)${NC}"
+        log_line "WARN" "auto_commit_failed task=$task_id"
+    fi
+
+    return 0
+}
+
+# ── Auto-commit after iteration (incremental safety) ──
+# Lighter commit after each iteration to prevent data loss during long tasks.
+auto_commit_iteration() {
+    local iteration="${1:-0}"
+    local task_id="${2:-unknown}"
+
+    if [[ "$AUTO_COMMIT_ON_TASK" != "true" ]]; then
+        return 0
+    fi
+
+    # Only commit if there are meaningful changes (more than 3 files changed)
+    local changed_count=$(git diff --name-only 2>/dev/null | wc -l || echo "0")
+    if [[ "$changed_count" -lt 3 ]]; then
+        return 0
+    fi
+
+    git add -A 2>/dev/null || return 0
+    git commit -m "wip(ralph): iteration $iteration progress on $task_id [auto-save]" --no-verify 2>/dev/null || true
+    log_line "DEBUG" "auto_commit_iteration iteration=$iteration files=$changed_count"
+}
 
 # Run verification review using critic/code-review agent.
 # Returns 0 if APPROVED, 1 if REJECTED.
@@ -647,43 +877,87 @@ run_verification_review() {
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
     log_line "INFO" "verification_review_start iteration=$iteration"
 
-    # Gather evidence for the critic (truncate to avoid arg list too long)
+    # ── Gather evidence for the critic ──
+    # Use `git diff` (unstaged) not `git diff HEAD~1` (which breaks without commits)
+    # Use `git diff --cached` for staged changes too
     local task_prompt=$(get_prompt | head -100)
-    local git_diff=$(git diff HEAD~1 2>/dev/null | head -150 || echo "<no diff>")
-    local git_status=$(git status --short 2>/dev/null | head -30 || echo "<clean>")
-    local last_output=$(tail -50 "$output_file" 2>/dev/null || echo "<no output>")
-    local files_changed=$(git diff --name-only HEAD~1 2>/dev/null | head -20 || echo "<none>")
+    local git_diff_unstaged=$(git diff 2>/dev/null | head -300 || echo "<no unstaged diff>")
+    local git_diff_staged=$(git diff --cached 2>/dev/null | head -100 || echo "<no staged diff>")
+    local git_status=$(git status --short 2>/dev/null | head -50 || echo "<clean>")
+    local last_output=$(tail -100 "$output_file" 2>/dev/null || echo "<no output>")
+    local files_changed=$(git diff --name-only 2>/dev/null | head -30 || echo "<none>")
+    local files_staged=$(git diff --cached --name-only 2>/dev/null | head -20 || echo "<none>")
+
+    # Run compile check and include results if available
+    local compile_results=""
+    local compile_cmd
+    compile_cmd=$(detect_compile_check_cmd)
+    if [[ -n "$compile_cmd" ]]; then
+        local compile_out
+        compile_out=$(eval "timeout 60 $compile_cmd" 2>&1 || true)
+        local error_lines=$(echo "$compile_out" | grep -ciE "error" 2>/dev/null || echo "0")
+        if [[ "$error_lines" -gt 0 ]]; then
+            compile_results="
+## ⚠️ Compilation/Analysis Results ($error_lines error lines detected)
+\`\`\`
+$(echo "$compile_out" | grep -iE "error" | head -40)
+\`\`\`
+"
+        else
+            compile_results="
+## ✅ Compilation Check: PASSED (no errors)
+"
+        fi
+    fi
 
     # Build the review prompt and write to file to avoid "Argument list too long"
     local review_prompt_file="${RALPH_DIR}/review-prompt.txt"
     cat > "$review_prompt_file" <<REVIEW_EOF
 # Critical Review — Iteration $iteration
 
-You are a **CODE REVIEWER / CRITIC**. Verify whether the task has GENUINELY been completed.
+You are a **STRICT CODE REVIEWER / CRITIC**. Verify whether the task has GENUINELY been completed with working, compilable code.
 
 ## Original Task (summary)
 $task_prompt
 
-## Files Changed
+## Files Changed (unstaged)
 $files_changed
 
-## Current File Status
+## Files Changed (staged)
+$files_staged
+
+## Current File Status (git status)
 $git_status
 
-## Changes Made (git diff, truncated)
-$git_diff
+## Changes Made (git diff, truncated to 300 lines)
+$git_diff_unstaged
 
-## Your Review Instructions
-1. **Verify acceptance criteria** by running commands to check files exist and have correct content
-2. **Look for placeholders** — TODO comments, empty functions = REJECT
-3. **Check syntax** — would this code actually compile/run?
-4. **Assess completeness** — is the task fully done, not just scaffolded?
+## Staged Changes (git diff --cached, truncated)
+$git_diff_staged
+$compile_results
+## Doer's Last Output (tail)
+$last_output
+
+## Your Review Instructions — BE STRICT
+1. **Verify acceptance criteria** — run commands to check files exist and have correct content
+2. **Look for placeholders** — TODO comments, empty functions, stub implementations = REJECT
+3. **Check compilation** — if compile results above show errors, you MUST REJECT
+4. **Check imports** — undefined classes, missing imports = REJECT
+5. **Check type safety** — type mismatches, dynamic casts = REJECT
+6. **Assess completeness** — is the task fully done, not just scaffolded?
+7. **Verify structure** — does code follow the architecture described in the task?
+
+## Critical: Compile Errors = Automatic REJECT
+If the compilation/analysis results above show ANY errors, you MUST reject.
+Code that doesn't compile is NOT complete, regardless of other criteria.
 
 ## Your Verdict
-If complete with real working code: \`<verdict>APPROVED</verdict>\`
-If issues exist: \`<verdict>REJECTED</verdict>\` followed by \`<issues>list</issues>\`
+If complete with REAL, WORKING, COMPILABLE code: \`<verdict>APPROVED</verdict>\`
+If ANY issues exist: \`<verdict>REJECTED</verdict>\` followed by \`<issues>detailed list of problems</issues>\`
 
-⚠️ Be STRICT. Only approve when ALL acceptance criteria are met.
+⚠️ Be STRICT. Only approve when ALL acceptance criteria are met AND code compiles.
+⚠️ Do NOT approve placeholder/skeleton code.
+⚠️ Do NOT approve code with undefined references or import errors.
 REVIEW_EOF
 
     # Build model options
@@ -835,6 +1109,11 @@ $prompt
 $(git status --short 2>/dev/null | head -40 || echo '<clean>')
 \`\`\`
 
+## Recent Changes (diff stat)
+\`\`\`
+$(git diff --stat 2>/dev/null | tail -20 || echo '<no changes>')
+\`\`\`
+
 ## Recent Commits
 \`\`\`
 $(git log --oneline -5 2>/dev/null || echo '<none>')
@@ -866,10 +1145,12 @@ When ALL acceptance criteria are met, output exactly:
 <promise>$promise</promise>
 \`\`\`
 ⚠️ ONLY when genuinely complete. Never lie.
-⚠️ Your output will be reviewed by a CRITIC AGENT before acceptance.
+⚠️ Your output will be reviewed by a COMPILATION CHECK and then a CRITIC AGENT.
+⚠️ If compilation fails (e.g. \`dart analyze\` shows errors), completion is auto-rejected.
 ⚠️ Skeleton code, placeholders, or incomplete implementations will be REJECTED.
 ⚠️ Minimum $MIN_ITERATIONS iterations required before completion is accepted.
 ⚠️ If there were review issues listed above, you MUST have fixed ALL of them with actual file edits before claiming completion. Running grep to 'verify' without fixing is not acceptable.
+⚠️ ALWAYS run a compilation/analysis check before claiming completion.
 "
     fi
 
@@ -1014,7 +1295,12 @@ run_single() {
 
                 if [[ "$network_check" == "true" ]]; then
                     save_checkpoint "network_error"
-                    wait_for_internet
+                    if ! wait_for_internet; then
+                        echo -e "${RED}❌ Network wait timed out during iteration${NC}"
+                        log_line "WARN" "network_timeout_during_iteration"
+                        exit_code=28  # timeout
+                        break
+                    fi
                     network_retry_count=$((network_retry_count + 1))
                     echo -e "${CYAN}🔄 Retrying iteration... (attempt $((network_retry_count + 1))/$max_network_retries)${NC}"
                     continue
@@ -1119,31 +1405,80 @@ run_single() {
         if [[ "$iteration" -lt "$MIN_ITERATIONS" ]]; then
             echo -e "${YELLOW}⚠️ Minimum iterations not met ($iteration < $MIN_ITERATIONS). Rejecting early completion.${NC}"
             log_line "INFO" "min_iterations_reject iteration=$iteration min=$MIN_ITERATIONS"
-            # Save a note for the next iteration
-            echo "Your completion claim was rejected because the minimum iteration threshold ($MIN_ITERATIONS) has not been reached. You are on iteration $iteration. Continue working and verify your implementation thoroughly before claiming completion again." > "${RALPH_DIR}/review-issues.txt"
+
+            # ── Give ACTIONABLE feedback, not just "iterate more" ──
+            # Run compilation check and include results as feedback
+            local early_compile_feedback=""
+            local early_compile_cmd
+            early_compile_cmd=$(detect_compile_check_cmd)
+            if [[ -n "$early_compile_cmd" ]]; then
+                local early_compile_out
+                early_compile_out=$(eval "timeout 60 $early_compile_cmd" 2>&1 || true)
+                local early_error_count=$(echo "$early_compile_out" | grep -ciE "error" 2>/dev/null || echo "0")
+                if [[ "$early_error_count" -gt 0 ]]; then
+                    early_compile_feedback="
+
+## 🔨 Compilation Errors Found ($early_error_count)
+Fix these errors in this iteration:
+\`\`\`
+$(echo "$early_compile_out" | grep -iE "error" | head -30)
+\`\`\`
+"
+                fi
+            fi
+
+            # Save constructive feedback for the next iteration
+            cat > "${RALPH_DIR}/review-issues.txt" <<EARLY_EOF
+Your completion claim was rejected because the minimum iteration threshold ($MIN_ITERATIONS) has not been reached (you are on iteration $iteration).
+
+**In this iteration, you MUST:**
+1. Re-read ALL files you created/modified and verify they are correct
+2. Fix any compilation errors listed below
+3. Check for TODO/FIXME/placeholder comments and replace them with real code
+4. Verify all imports resolve correctly
+5. Ensure all acceptance criteria from the task are genuinely met
+6. Only then claim completion again
+${early_compile_feedback}
+EARLY_EOF
         else
-            # ── Quality Gate 2: Critic verification review ──
-            if run_verification_review "$iteration" "$promise" "$OUTPUT_FILE"; then
-                echo ""
-                echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
-                echo -e "${GREEN}✅ VERIFIED AND APPROVED BY CRITIC!${NC}"
-                echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
-
-                # Export for completion hook
-                export RALPH_PROMISE="$promise"
-
-                # Run completion hook
-                run_hook "on-completion"
-
-                # Complete the task
-                python3 "$SCRIPT_DIR/ralph_mode.py" complete < "$OUTPUT_FILE" || true
-                return 0
+            # ── Quality Gate 0: Compilation/Analysis Check ──
+            # Block critic entirely if code doesn't compile
+            if ! run_compilation_gate; then
+                echo -e "${YELLOW}⚠️ Compilation gate FAILED — skipping critic, forcing fix iteration${NC}"
+                log_line "INFO" "compilation_gate_blocked_critic"
+                # review-issues.txt already written by run_compilation_gate
             else
-                echo -e "${YELLOW}⚠️ Critic REJECTED completion. Continuing iterations...${NC}"
-                log_line "INFO" "critic_rejected_continuing"
+                # ── Quality Gate 2: Critic verification review ──
+                if run_verification_review "$iteration" "$promise" "$OUTPUT_FILE"; then
+                    echo ""
+                    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+                    echo -e "${GREEN}✅ VERIFIED AND APPROVED BY CRITIC!${NC}"
+                    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+
+                    # ── Auto-commit the completed task ──
+                    local task_id=$(get_state "current_task_id")
+                    auto_commit_task "${task_id:-unknown}" "$iteration"
+
+                    # Export for completion hook
+                    export RALPH_PROMISE="$promise"
+
+                    # Run completion hook
+                    run_hook "on-completion"
+
+                    # Complete the task
+                    python3 "$SCRIPT_DIR/ralph_mode.py" complete < "$OUTPUT_FILE" || true
+                    return 0
+                else
+                    echo -e "${YELLOW}⚠️ Critic REJECTED completion. Continuing iterations...${NC}"
+                    log_line "INFO" "critic_rejected_continuing"
+                fi
             fi
         fi
     fi
+
+    # ── Auto-save iteration progress (incremental safety) ──
+    local task_id_save=$(get_state "current_task_id")
+    auto_commit_iteration "$iteration" "${task_id_save:-unknown}"
 
     # Increment iteration
     python3 "$SCRIPT_DIR/ralph_mode.py" iterate || {
@@ -1257,7 +1592,21 @@ run_loop() {
 
             # Check network before retrying
             if [[ "$network_check" == "true" ]] && ! check_internet; then
-                wait_for_internet
+                if ! wait_for_internet; then
+                    # Network timeout exceeded — skip to next task in batch mode
+                    local mode=$(get_state "mode")
+                    if [[ "$mode" == "batch" ]]; then
+                        echo -e "${YELLOW}⚠️ Network timeout — skipping to next task...${NC}"
+                        log_line "WARN" "network_timeout_skip_task"
+                        python3 "$SCRIPT_DIR/ralph_mode.py" next-task 2>/dev/null || true
+                        consecutive_failures=0
+                        continue
+                    else
+                        echo -e "${RED}❌ Network timeout in single mode. Stopping.${NC}"
+                        save_checkpoint "network_timeout"
+                        break
+                    fi
+                fi
             fi
         fi
 

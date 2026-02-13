@@ -629,6 +629,17 @@ build_copilot_opts() {
         done
     fi
 
+    # ── MCP Server Configuration ──
+    # Load MCP servers from config file if present
+    local mcp_config=".ralph-mode-config/mcp-config.json"
+    if [[ -f "$mcp_config" ]]; then
+        local mcp_servers
+        mcp_servers=$(jq -r '.mcpServers | keys[]' "$mcp_config" 2>/dev/null || true)
+        if [[ -n "$mcp_servers" ]]; then
+            opts="$opts --mcp-config $mcp_config"
+        fi
+    fi
+
     echo "$opts"
 }
 
@@ -910,6 +921,30 @@ $(echo "$compile_out" | grep -iE "error" | head -40)
         fi
     fi
 
+    # Include Memory Bank context for critic awareness
+    local critic_memory=""
+    local memory_out
+    memory_out=$(python3 "$SCRIPT_DIR/ralph_mode.py" memory show --limit 5 2>/dev/null || echo "")
+    if [[ -n "$memory_out" ]]; then
+        critic_memory="
+## Memory Bank — Previous Learnings
+$memory_out
+"
+    fi
+
+    # Run task-specific verification commands if available
+    local verification_results=""
+    local verify_out
+    verify_out=$(python3 "$SCRIPT_DIR/ralph_mode.py" verify run 2>/dev/null || echo "")
+    if [[ -n "$verify_out" ]]; then
+        verification_results="
+## Task Verification Results
+\`\`\`
+$(echo "$verify_out" | tail -30)
+\`\`\`
+"
+    fi
+
     # Build the review prompt and write to file to avoid "Argument list too long"
     local review_prompt_file="${RALPH_DIR}/review-prompt.txt"
     cat > "$review_prompt_file" <<REVIEW_EOF
@@ -935,6 +970,8 @@ $git_diff_unstaged
 ## Staged Changes (git diff --cached, truncated)
 $git_diff_staged
 $compile_results
+$critic_memory
+$verification_results
 ## Doer's Last Output (tail)
 $last_output
 
@@ -968,9 +1005,13 @@ REVIEW_EOF
 
     local review_output_file="${RALPH_DIR}/review-output.txt"
 
-    # Run Copilot CLI for critic review (no --agent, use default)
+    # Run Copilot CLI for critic review — use critic agent for structured review
+    local critic_agent_opts=""
+    if [[ -f ".github/agents/critic.md" ]]; then
+        critic_agent_opts="--agent=critic"
+    fi
     echo -e "${BLUE}🤖 Running critic review...${NC}"
-    if cat "$review_prompt_file" | timeout 300 $COPILOT_ENV_PREFIX $COPILOT_CMD $copilot_opts $model_opts 2>&1 | tee "$review_output_file"; then
+    if cat "$review_prompt_file" | timeout 300 $COPILOT_ENV_PREFIX $COPILOT_CMD $copilot_opts $model_opts $critic_agent_opts 2>&1 | tee "$review_output_file"; then
         echo ""
     else
         echo -e "${YELLOW}⚠️ Review agent failed to run, defaulting to REJECTED (iterate more)${NC}"
@@ -1137,6 +1178,26 @@ $(cat "${RALPH_DIR}/environment-notes.md" 2>/dev/null)
 "
     fi
 
+    # Include Memory Bank context for long-term awareness across iterations
+    local memory_context
+    memory_context=$(python3 "$SCRIPT_DIR/ralph_mode.py" memory show --limit 10 2>/dev/null || echo "")
+    if [[ -n "$memory_context" ]]; then
+        context="$context
+## Memory Bank (key learnings from previous iterations)
+$memory_context
+"
+    fi
+
+    # Include relevant semantic memories (patterns, decisions, dependencies)
+    local semantic_memories
+    semantic_memories=$(python3 "$SCRIPT_DIR/ralph_mode.py" memory search "current task" --memory-type semantic --limit 5 2>/dev/null || echo "")
+    if [[ -n "$semantic_memories" ]]; then
+        context="$context
+## Remembered Patterns & Decisions
+$semantic_memories
+"
+    fi
+
     if [[ -n "$promise" ]]; then
         context="$context
 ## Completion
@@ -1248,10 +1309,13 @@ run_single() {
         model_opts="--model $model"
     fi
 
-    # Build agent options
+    # Build agent options — default to 'ralph' agent for structured iterations
     local agent_opts=""
     if [[ -n "$agent" ]]; then
         agent_opts="--agent=$agent"
+    elif [[ -f ".github/agents/ralph.md" ]]; then
+        agent_opts="--agent=ralph"
+        log_line "DEBUG" "using_default_agent=ralph"
     fi
 
     # Run Copilot CLI
@@ -1386,6 +1450,9 @@ run_single() {
     # Run post-iteration hook
     run_hook "post-iteration"
 
+    # ── Auto-commit iteration progress ──
+    auto_commit_iteration "$iteration"
+
     # ── Advanced Contexting: pre-build context for next iteration ──
     write_context_file
 
@@ -1441,6 +1508,14 @@ Your completion claim was rejected because the minimum iteration threshold ($MIN
 ${early_compile_feedback}
 EARLY_EOF
         else
+            # ── Pre-Gate: Run task-specific verification commands ──
+            local verify_result
+            verify_result=$(python3 "$SCRIPT_DIR/ralph_mode.py" verify run 2>/dev/null || echo "")
+            if [[ -n "$verify_result" ]]; then
+                echo -e "${CYAN}📋 Task verification results available${NC}"
+                log_line "INFO" "verification_ran"
+            fi
+
             # ── Quality Gate 0: Compilation/Analysis Check ──
             # Block critic entirely if code doesn't compile
             if ! run_compilation_gate; then

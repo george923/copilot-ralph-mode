@@ -8,15 +8,30 @@
 #   RALPH_MODE - "single" or "batch"
 #   RALPH_PROMISE - The completion promise that was detected
 
-# Example: Log completion
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Log completion
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Task completed at iteration $RALPH_ITERATION" >> .ralph-mode/hooks.log
 
-# Example: Send notification
-# curl -X POST "https://hooks.slack.com/..." -d '{"text":"Ralph completed task"}' 2>/dev/null || true
+# ── Generate task summary ──
+{
+    echo "## Task Completed"
+    echo "- **Task ID**: ${RALPH_TASK_ID:-unknown}"
+    echo "- **Iterations**: $RALPH_ITERATION"
+    echo "- **Completed at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "- **Promise**: $RALPH_PROMISE"
+    echo ""
+    echo "### Files Changed"
+    git diff --stat HEAD~1 2>/dev/null || echo "  (no git history)"
+    echo ""
+    echo "### Memory Bank Stats"
+    python3 "$SCRIPT_DIR/ralph_mode.py" memory stats 2>/dev/null || echo "  (unavailable)"
+} > .ralph-mode/task-summary.md 2>/dev/null
 
-# Example: Create a summary
-# echo "## Task Completed" > .ralph-mode/summary.md
-# echo "- Iterations: $RALPH_ITERATION" >> .ralph-mode/summary.md
-# echo "- Task: $RALPH_TASK_ID" >> .ralph-mode/summary.md
+# ── Final security scan ──
+python3 "$SCRIPT_DIR/ralph_mode.py" scan --quiet 2>/dev/null || true
+
+# ── Promote key learnings to long-term memory ──
+python3 "$SCRIPT_DIR/ralph_mode.py" memory promote 2>/dev/null || true
 
 exit 0

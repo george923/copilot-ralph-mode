@@ -8,14 +8,16 @@
 #   RALPH_TASK_ID - Current task ID (in batch mode)
 #   RALPH_MODE - "single" or "batch"
 
-# Example: Log iteration start
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Log iteration start
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Starting iteration $RALPH_ITERATION" >> .ralph-mode/hooks.log
 
-# Example: Run linting before each iteration
-# npm run lint --silent 2>/dev/null || true
+# Clear working memory for fresh start each iteration
+python3 "$SCRIPT_DIR/ralph_mode.py" memory clear-working 2>/dev/null || true
 
-# Example: Check disk space
-# df -h . | tail -1
+# Log memory bank stats for debugging
+python3 "$SCRIPT_DIR/ralph_mode.py" memory stats 2>/dev/null >> .ralph-mode/hooks.log || true
 
 # Return 0 to continue, non-zero to abort
 exit 0
